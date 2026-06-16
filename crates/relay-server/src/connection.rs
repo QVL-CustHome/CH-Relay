@@ -143,11 +143,11 @@ where
                             let granted = hub::to_core_qos(opts.qos).min(MAX_QOS);
                             if let Some(shared) = SharedSubscription::parse(filter) {
                                 info!(%peer, group = %shared.group, filter = %shared.filter.as_str(), ?granted, "SUBSCRIBE (shared)");
-                                hub.subscribe_shared(shared.group, id, shared.filter, granted);
+                                hub.subscribe_shared(shared.group, id, shared.filter, granted, filter);
                                 status.push(granted_reason(granted));
                             } else if let Some(tf) = TopicFilter::parse(filter) {
                                 info!(%peer, %filter, ?granted, "SUBSCRIBE");
-                                hub.subscribe(id, tf.clone(), granted);
+                                hub.subscribe(id, tf.clone(), granted, filter);
                                 retained_jobs.push((tf, granted));
                                 status.push(granted_reason(granted));
                             } else {

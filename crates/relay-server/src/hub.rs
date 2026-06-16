@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
-use relay_core::{ClientId, Message, QoS, RetainedStore, Router, TopicFilter};
+use relay_core::{ClientId, Message, QoS, RetainedStore, Router, SharedSubscription, TopicFilter};
 use rmqtt_codec::types::Publish;
 use rmqtt_codec::v5::{
     Packet, PublishAck2, PublishAck2Reason, PublishProperties, QoS as WireQoS,
@@ -86,6 +86,8 @@ enum Inflight {
 
 /// Per-`client_id` session. Survives disconnection (subject to expiry).
 struct Session {
+    /// The MQTT client identifier — the persistence key.
+    client_id: String,
     /// Live delivery channel while online; `None` while disconnected.
     tx: Option<mpsc::UnboundedSender<Packet>>,
     /// Next packet identifier to hand out (1..=65535, never 0).
@@ -103,9 +105,15 @@ struct Session {
 }
 
 impl Session {
-    fn new(tx: mpsc::UnboundedSender<Packet>, expiry_secs: u32, generation: u64) -> Self {
+    fn new(
+        client_id: String,
+        tx: Option<mpsc::UnboundedSender<Packet>>,
+        expiry_secs: u32,
+        generation: u64,
+    ) -> Self {
         Session {
-            tx: Some(tx),
+            client_id,
+            tx,
             next_id: 1,
             inflight: VecDeque::new(),
             incoming_qos2: HashSet::new(),
@@ -233,6 +241,12 @@ impl Hub {
     /// in-memory.
     pub fn new(storage: Option<Storage>) -> Self {
         let mut retained = RetainedStore::new();
+        let mut router = Router::new();
+        let mut table = SessionTable::default();
+        let mut next_raw = 1u64;
+        // Durable sessions to expire (treating startup as their detach time).
+        let mut to_expire: Vec<(ClientId, u32)> = Vec::new();
+
         if let Some(s) = &storage {
             match s.load_retained() {
                 Ok(messages) => {
@@ -244,16 +258,56 @@ impl Hub {
                 }
                 Err(e) => warn!(error = %e, "failed to load retained messages from disk"),
             }
+
+            match s.load_sessions() {
+                Ok(sessions) => {
+                    let n = sessions.len();
+                    for ps in sessions {
+                        let id = ClientId(next_raw);
+                        next_raw += 1;
+                        // Rebuild the subscriptions in the router.
+                        for (raw, qos) in ps.subscriptions {
+                            if let Some(shared) = SharedSubscription::parse(&raw) {
+                                router.subscribe_shared(shared.group, id, shared.filter, qos);
+                            } else if let Some(tf) = TopicFilter::parse(&raw) {
+                                router.subscribe(id, tf, qos);
+                            }
+                        }
+                        // Re-create the session offline (generation 0).
+                        table.id_of.insert(ps.client_id.clone(), id);
+                        table
+                            .by_id
+                            .insert(id, Session::new(ps.client_id, None, ps.expiry_secs, 0));
+                        if ps.expiry_secs != NO_EXPIRY {
+                            to_expire.push((id, ps.expiry_secs));
+                        }
+                    }
+                    debug!(sessions = n, "loaded durable sessions from disk");
+                }
+                Err(e) => warn!(error = %e, "failed to load sessions from disk"),
+            }
         }
-        Hub {
+
+        let hub = Hub {
             inner: Arc::new(Inner {
-                next_id: AtomicU64::new(1),
-                router: Mutex::new(Router::new()),
+                next_id: AtomicU64::new(next_raw),
+                router: Mutex::new(router),
                 retained: Mutex::new(retained),
-                sessions: Mutex::new(SessionTable::default()),
+                sessions: Mutex::new(table),
                 storage,
             }),
+        };
+
+        // Schedule expiry for reloaded sessions still offline (generation 0).
+        for (id, expiry) in to_expire {
+            let hub = hub.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(expiry as u64)).await;
+                hub.purge_if_idle(id, 0);
+            });
         }
+
+        hub
     }
 
     /// Attach a connection for `client_id`. Resumes an existing session unless
@@ -273,11 +327,14 @@ impl Hub {
                 // Drop the old session and its subscriptions, start fresh.
                 table.by_id.remove(&id);
                 self.inner.router.lock().unwrap().remove_client(id);
+                self.forget_persisted(client_id);
                 let new_id = ClientId(self.inner.next_id.fetch_add(1, Ordering::Relaxed));
                 table.id_of.insert(client_id.to_string(), new_id);
-                table
-                    .by_id
-                    .insert(new_id, Session::new(tx, expiry_secs, generation));
+                table.by_id.insert(
+                    new_id,
+                    Session::new(client_id.to_string(), Some(tx), expiry_secs, generation),
+                );
+                self.persist_meta(client_id, expiry_secs);
                 return Connected { id: new_id, generation, rx, session_present: false };
             }
             // Resume: re-attach the channel, refresh expiry, retransmit in-flight.
@@ -286,16 +343,60 @@ impl Hub {
             session.expiry_secs = expiry_secs;
             session.generation = generation;
             session.retransmit();
+            self.persist_meta(client_id, expiry_secs);
             return Connected { id, generation, rx, session_present: true };
         }
 
         // Brand-new session.
         let id = ClientId(self.inner.next_id.fetch_add(1, Ordering::Relaxed));
         table.id_of.insert(client_id.to_string(), id);
-        table
-            .by_id
-            .insert(id, Session::new(tx, expiry_secs, generation));
+        table.by_id.insert(
+            id,
+            Session::new(client_id.to_string(), Some(tx), expiry_secs, generation),
+        );
+        self.persist_meta(client_id, expiry_secs);
         Connected { id, generation, rx, session_present: false }
+    }
+
+    /// Persist (expiry > 0) or clear (expiry == 0) a session's durable marker.
+    fn persist_meta(&self, client_id: &str, expiry_secs: u32) {
+        if let Some(storage) = &self.inner.storage {
+            let r = if expiry_secs > 0 {
+                storage.put_session(client_id, expiry_secs)
+            } else {
+                storage.remove_session(client_id)
+            };
+            if let Err(e) = r {
+                warn!(%client_id, error = %e, "failed to persist session");
+            }
+        }
+    }
+
+    /// Forget a persisted session and its subscriptions (e.g. on clean start).
+    fn forget_persisted(&self, client_id: &str) {
+        if let Some(storage) = &self.inner.storage {
+            if let Err(e) = storage.remove_session(client_id) {
+                warn!(%client_id, error = %e, "failed to forget persisted session");
+            }
+        }
+    }
+
+    /// Persist one subscription if the session is durable (expiry > 0).
+    fn persist_subscription(&self, id: ClientId, raw: &str, qos: QoS) {
+        let Some(storage) = &self.inner.storage else { return };
+        let client_id = {
+            let table = self.inner.sessions.lock().unwrap();
+            table
+                .by_id
+                .get(&id)
+                .filter(|s| s.expiry_secs > 0)
+                .map(|s| s.client_id.clone())
+        };
+        if let Some(client_id) = client_id {
+            if let Err(e) = storage.put_subscription(&client_id, raw, qos) {
+                warn!(%client_id, error = %e, "failed to persist subscription");
+            }
+        }
     }
 
     /// Detach a connection (disconnect/error). If the session-expiry interval is
@@ -336,25 +437,34 @@ impl Hub {
         }
     }
 
-    /// Remove a session entirely: table entries + its subscriptions.
+    /// Remove a session entirely: table entries, subscriptions, and disk record.
     fn discard(&self, table: &mut SessionTable, id: ClientId) {
-        table.by_id.remove(&id);
+        let client_id = table.by_id.remove(&id).map(|s| s.client_id);
         table.id_of.retain(|_, v| *v != id);
         self.inner.router.lock().unwrap().remove_client(id);
+        if let (Some(storage), Some(client_id)) = (&self.inner.storage, client_id) {
+            if let Err(e) = storage.remove_session(&client_id) {
+                warn!(%client_id, error = %e, "failed to remove persisted session");
+            }
+        }
     }
 
-    /// Register a normal (fan-out) subscription at granted `qos`.
-    pub fn subscribe(&self, id: ClientId, filter: TopicFilter, qos: QoS) {
+    /// Register a normal (fan-out) subscription at granted `qos`. `raw` is the
+    /// filter string as sent, persisted for durable sessions.
+    pub fn subscribe(&self, id: ClientId, filter: TopicFilter, qos: QoS, raw: &str) {
         self.inner.router.lock().unwrap().subscribe(id, filter, qos);
+        self.persist_subscription(id, raw, qos);
     }
 
     /// Register a shared subscription: `id` joins `group` with `filter` at `qos`.
-    pub fn subscribe_shared(&self, group: String, id: ClientId, filter: TopicFilter, qos: QoS) {
+    /// `raw` is the `$share/...` string as sent, persisted for durable sessions.
+    pub fn subscribe_shared(&self, group: String, id: ClientId, filter: TopicFilter, qos: QoS, raw: &str) {
         self.inner
             .router
             .lock()
             .unwrap()
             .subscribe_shared(group, id, filter, qos);
+        self.persist_subscription(id, raw, qos);
     }
 
     /// Replay retained messages matching `filter` to a freshly-subscribed
