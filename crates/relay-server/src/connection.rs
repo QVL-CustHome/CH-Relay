@@ -2,99 +2,44 @@
 //!
 //! The `Framed` stream is split into a reader (`stream`) and a writer (`sink`).
 //! A `tokio::select!` interleaves two sources:
-//! - **incoming**: packets from this client (CONNECT, SUBSCRIBE, PUBLISH, …);
-//! - **outgoing**: [`Delivery`]s the [`Hub`] routes *to* this client because it
-//!   subscribed to a topic someone else published on.
+//! - **incoming**: packets from this client (CONNECT, SUBSCRIBE, PUBLISH, acks…);
+//! - **outgoing**: ready-to-write [`Packet`]s the client's [`Session`] pushes
+//!   onto its channel — outbound PUBLISHes, retransmits, PUBRELs, retained.
 //!
-//! ## QoS
+//! The connection itself is thin: all durable QoS state (packet-id counter,
+//! in-flight queue, inbound QoS 2 dedup, subscriptions) lives in the [`Hub`]'s
+//! session so it survives reconnects. The connection registers its session on
+//! CONNECT, forwards acknowledgements to the hub, writes its own immediate
+//! responses (CONNACK/SUBACK/PUBACK/PINGRESP and the inbound QoS 2 PUBREC/
+//! PUBCOMP) directly, and detaches the session on exit.
 //!
-//! The broker supports QoS 0, 1 (at-least-once) and 2 (exactly-once).
+//! Transport-agnostic: `io` is any byte stream — a raw `TcpStream` or the
+//! WebSocket byte adapter ([`crate::ws::WsByteStream`]) — so the same loop serves
+//! the TCP and the WebSocket listener.
 //!
-//! - **Inbound** PUBLISH at QoS 1 is PUBACK'd; at QoS 2 it gets the
-//!   PUBREC→PUBREL→PUBCOMP handshake, and is routed only on first receipt (the
-//!   packet id is remembered until PUBREL so a retransmitted PUBLISH is not
-//!   delivered twice).
-//! - **Outbound** delivery at QoS ≥ 1 carries a packet id drawn from this
-//!   connection's own counter, tracked until the matching PUBACK (QoS 1) or
-//!   PUBREC/PUBCOMP (QoS 2) returns. (Retransmission across reconnects needs
-//!   persistent sessions — a later step; the in-memory tracking drives the live
-//!   handshake correctly.)
+//! [`Session`]: crate::hub
+//! [`Hub`]: crate::hub::Hub
 
-use std::collections::HashSet;
 use std::num::NonZeroU16;
 
 use futures::{SinkExt, StreamExt};
-use relay_core::{Message, QoS, SharedSubscription, TopicFilter};
-use rmqtt_codec::types::Publish;
+use relay_core::{ClientId, Message, QoS, SharedSubscription, TopicFilter};
 use rmqtt_codec::v5::{
     Codec, ConnectAck, ConnectAckReason, DisconnectReasonCode, Packet, PublishAck, PublishAck2,
-    PublishAck2Reason, PublishAckReason, PublishProperties, QoS as WireQoS, SubscribeAck,
-    SubscribeAckReason,
+    PublishAck2Reason, PublishAckReason, SubscribeAck, SubscribeAckReason,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::mpsc;
 use tokio_util::codec::Framed;
 use tracing::{debug, info, warn};
 
-use crate::hub::{Delivery, Hub};
+use crate::hub::{self, Hub};
 
 /// Maximum inbound packet size we accept (256 KiB); 0 outbound = unlimited.
 const MAX_INBOUND_SIZE: u32 = 256 * 1024;
 
 /// Highest QoS the broker grants/delivers.
 const MAX_QOS: QoS = QoS::ExactlyOnce;
-
-/// Per-connection state for QoS > 0 delivery *to* this client.
-///
-/// QoS 1 awaits a single PUBACK. QoS 2 is the four-packet handshake: we send
-/// PUBLISH and await PUBREC; on PUBREC we send PUBREL and await PUBCOMP.
-struct OutboundQos {
-    /// Next packet identifier to hand out (1..=65535, never 0).
-    next_id: u16,
-    /// QoS 1 ids delivered and not yet PUBACK'd by this client.
-    qos1_unacked: HashSet<u16>,
-    /// QoS 2 ids delivered, awaiting PUBREC.
-    qos2_pubrec: HashSet<u16>,
-    /// QoS 2 ids we've sent PUBREL for, awaiting PUBCOMP.
-    qos2_pubcomp: HashSet<u16>,
-}
-
-impl OutboundQos {
-    fn new() -> Self {
-        Self {
-            next_id: 1,
-            qos1_unacked: HashSet::new(),
-            qos2_pubrec: HashSet::new(),
-            qos2_pubcomp: HashSet::new(),
-        }
-    }
-
-    /// Allocate the next packet id, maintaining the "never 0" invariant.
-    fn allocate(&mut self) -> NonZeroU16 {
-        let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1);
-        if self.next_id == 0 {
-            self.next_id = 1;
-        }
-        // `id` is non-zero by the invariant we maintain on `next_id`.
-        NonZeroU16::new(id).expect("packet id invariant: never 0")
-    }
-}
-
-fn wire_to_core(q: WireQoS) -> QoS {
-    match q {
-        WireQoS::AtMostOnce => QoS::AtMostOnce,
-        WireQoS::AtLeastOnce => QoS::AtLeastOnce,
-        WireQoS::ExactlyOnce => QoS::ExactlyOnce,
-    }
-}
-
-fn core_to_wire(q: QoS) -> WireQoS {
-    match q {
-        QoS::AtMostOnce => WireQoS::AtMostOnce,
-        QoS::AtLeastOnce => WireQoS::AtLeastOnce,
-        QoS::ExactlyOnce => WireQoS::ExactlyOnce,
-    }
-}
 
 fn granted_reason(q: QoS) -> SubscribeAckReason {
     match q {
@@ -104,7 +49,7 @@ fn granted_reason(q: QoS) -> SubscribeAckReason {
     }
 }
 
-/// PUBREC — acknowledges receipt of a QoS 2 PUBLISH (handshake step 2).
+/// PUBREC — we (as receiver) acknowledge a QoS 2 PUBLISH (handshake step 2).
 fn pubrec(packet_id: NonZeroU16) -> Packet {
     Packet::PublishReceived(PublishAck {
         packet_id,
@@ -114,17 +59,7 @@ fn pubrec(packet_id: NonZeroU16) -> Packet {
     })
 }
 
-/// PUBREL — releases a QoS 2 message (handshake step 3).
-fn pubrel(packet_id: NonZeroU16) -> Packet {
-    Packet::PublishRelease(PublishAck2 {
-        packet_id,
-        reason_code: PublishAck2Reason::Success,
-        properties: Vec::new(),
-        reason_string: None,
-    })
-}
-
-/// PUBCOMP — completes a QoS 2 handshake (step 4).
+/// PUBCOMP — we (as receiver) complete a QoS 2 handshake (step 4).
 fn pubcomp(packet_id: NonZeroU16) -> Packet {
     Packet::PublishComplete(PublishAck2 {
         packet_id,
@@ -134,55 +69,26 @@ fn pubcomp(packet_id: NonZeroU16) -> Packet {
     })
 }
 
-/// Turn a routed [`Delivery`] into a PUBLISH packet for this connection,
-/// stamping a packet id (and starting the QoS 1/2 tracking) as needed.
-fn build_publish(delivery: Delivery, qos_state: &mut OutboundQos) -> Packet {
-    let qos = delivery.qos.min(MAX_QOS);
-    let packet_id = match qos {
-        QoS::AtMostOnce => None,
-        QoS::AtLeastOnce => {
-            let id = qos_state.allocate();
-            qos_state.qos1_unacked.insert(id.get());
-            Some(id)
-        }
-        QoS::ExactlyOnce => {
-            let id = qos_state.allocate();
-            qos_state.qos2_pubrec.insert(id.get());
-            Some(id)
-        }
-    };
-
-    Packet::Publish(Box::new(Publish {
-        dup: false,
-        retain: delivery.retain,
-        qos: core_to_wire(qos),
-        topic: delivery.topic.into(),
-        packet_id,
-        payload: delivery.payload,
-        properties: Some(PublishProperties::default()),
-    }))
+/// Await the next outbound packet, or never resolve if not yet connected (no
+/// session channel exists before CONNECT).
+async fn next_outbound(rx: &mut Option<mpsc::UnboundedReceiver<Packet>>) -> Option<Packet> {
+    match rx {
+        Some(r) => r.recv().await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Drive a single client connection until it disconnects or errors.
-///
-/// Transport-agnostic: `io` is any byte stream — a raw [`TcpStream`] or the
-/// WebSocket byte adapter ([`crate::ws::WsByteStream`]) — so the exact same MQTT
-/// loop serves both the TCP and the WebSocket listener.
-///
-/// [`TcpStream`]: tokio::net::TcpStream
 pub async fn handle<S>(io: S, peer: String, hub: Hub)
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let (id, mut rx) = hub.register();
     let (mut sink, mut stream) = Framed::new(io, Codec::new(MAX_INBOUND_SIZE, 0)).split();
-    let mut connected = false;
-    let mut qos_state = OutboundQos::new();
-    // QoS 2 packet ids received from this client (as a publisher), awaiting
-    // PUBREL — used to deliver the message exactly once despite retransmits.
-    let mut incoming_qos2: HashSet<u16> = HashSet::new();
-    // The client's Will, published if the connection ends *without* a clean
-    // DISCONNECT (network drop, protocol error, or DISCONNECT-with-Will).
+
+    let mut session_id: Option<ClientId> = None;
+    let mut generation: u64 = 0;
+    let mut rx: Option<mpsc::UnboundedReceiver<Packet>> = None;
+    // The client's Will, published if the connection ends without a clean DISCONNECT.
     let mut will: Option<Message> = None;
     let mut clean_disconnect = false;
 
@@ -198,16 +104,30 @@ where
 
                 match packet {
                     Packet::Connect(connect) => {
-                        info!(%peer, client_id = %connect.client_id, "CONNECT");
-                        connected = true;
-                        // Remember the Will (if any) to publish on abnormal exit.
+                        // An empty client id can't address a durable session, so
+                        // give it a unique, clean one tied to this connection.
+                        let provided = connect.client_id.to_string();
+                        let (client_id, clean_start) = if provided.is_empty() {
+                            (format!("anon:{peer}"), true)
+                        } else {
+                            (provided, connect.clean_start)
+                        };
+                        info!(%peer, %client_id, clean_start, "CONNECT");
+
+                        let conn = hub.connect(&client_id, clean_start, connect.session_expiry_interval_secs);
+                        session_id = Some(conn.id);
+                        generation = conn.generation;
+                        rx = Some(conn.rx);
+
                         will = connect.last_will.as_ref().map(|w| Message {
                             topic: w.topic.to_string(),
                             payload: w.message.clone(),
-                            qos: wire_to_core(w.qos),
+                            qos: hub::to_core_qos(w.qos),
                             retain: w.retain,
                         });
+
                         let ack = ConnectAck {
+                            session_present: conn.session_present,
                             reason_code: ConnectAckReason::Success,
                             ..ConnectAck::default()
                         };
@@ -215,32 +135,20 @@ where
                     }
 
                     Packet::Subscribe(sub) => {
-                        if !connected { warn!(%peer, "SUBSCRIBE before CONNECT, dropping"); break; }
+                        let Some(id) = session_id else { warn!(%peer, "SUBSCRIBE before CONNECT, dropping"); break; };
                         let mut status = Vec::with_capacity(sub.topic_filters.len());
-                        // Retained messages matching a fresh subscription are sent
-                        // *after* the SUBACK, marked retained.
-                        let mut retained_to_send: Vec<Delivery> = Vec::new();
+                        // Retained replay happens *after* the SUBACK, via the session.
+                        let mut retained_jobs: Vec<(TopicFilter, QoS)> = Vec::new();
                         for (filter, opts) in &sub.topic_filters {
-                            // Grant the requested QoS, capped at what we support.
-                            let granted = wire_to_core(opts.qos).min(MAX_QOS);
-                            // `$share/{group}/{filter}` is a shared subscription
-                            // (competing consumers); anything else is normal fan-out.
+                            let granted = hub::to_core_qos(opts.qos).min(MAX_QOS);
                             if let Some(shared) = SharedSubscription::parse(filter) {
                                 info!(%peer, group = %shared.group, filter = %shared.filter.as_str(), ?granted, "SUBSCRIBE (shared)");
-                                // Retained messages are not replayed to shared subs.
                                 hub.subscribe_shared(shared.group, id, shared.filter, granted);
                                 status.push(granted_reason(granted));
                             } else if let Some(tf) = TopicFilter::parse(filter) {
                                 info!(%peer, %filter, ?granted, "SUBSCRIBE");
-                                for msg in hub.retained_matching(&tf) {
-                                    retained_to_send.push(Delivery {
-                                        topic: msg.topic,
-                                        payload: msg.payload,
-                                        qos: msg.qos.min(granted),
-                                        retain: true,
-                                    });
-                                }
-                                hub.subscribe(id, tf, granted);
+                                hub.subscribe(id, tf.clone(), granted);
+                                retained_jobs.push((tf, granted));
                                 status.push(granted_reason(granted));
                             } else {
                                 warn!(%peer, %filter, "invalid topic filter");
@@ -255,35 +163,27 @@ where
                         };
                         if sink.send(Packet::from(ack)).await.is_err() { break; }
 
-                        // Replay retained messages now that the SUBACK is out.
-                        let mut send_failed = false;
-                        for delivery in retained_to_send {
-                            let packet = build_publish(delivery, &mut qos_state);
-                            if sink.send(packet).await.is_err() { send_failed = true; break; }
+                        // Now that the SUBACK is out, replay retained messages
+                        // (they flow through the session's channel).
+                        for (tf, granted) in retained_jobs {
+                            hub.deliver_retained(id, &tf, granted);
                         }
-                        if send_failed { break; }
                     }
 
                     Packet::Publish(p) => {
-                        if !connected { warn!(%peer, "PUBLISH before CONNECT, dropping"); break; }
+                        let Some(id) = session_id else { warn!(%peer, "PUBLISH before CONNECT, dropping"); break; };
                         let topic = p.topic.to_string();
-                        let msg_qos = wire_to_core(p.qos);
+                        let msg_qos = hub::to_core_qos(p.qos);
 
                         match msg_qos {
-                            // Fire-and-forget: just route it.
                             QoS::AtMostOnce => {
                                 let n = hub.publish(&topic, &p.payload, msg_qos, p.retain);
-                                debug!(%peer, %topic, subscribers = n, "PUBLISH routed (QoS 0)");
+                                debug!(%peer, %topic, recipients = n, "PUBLISH routed (QoS 0)");
                             }
-
-                            // At-least-once: route, then PUBACK the publisher.
                             QoS::AtLeastOnce => {
-                                let packet_id = match p.packet_id {
-                                    Some(pid) => pid,
-                                    None => { warn!(%peer, "QoS 1 PUBLISH without packet id, dropping"); break; }
-                                };
+                                let Some(packet_id) = p.packet_id else { warn!(%peer, "QoS 1 PUBLISH without packet id"); break; };
                                 let n = hub.publish(&topic, &p.payload, msg_qos, p.retain);
-                                debug!(%peer, %topic, subscribers = n, "PUBLISH routed (QoS 1)");
+                                debug!(%peer, %topic, recipients = n, "PUBLISH routed (QoS 1)");
                                 let ack = PublishAck {
                                     packet_id,
                                     reason_code: PublishAckReason::Success,
@@ -292,18 +192,11 @@ where
                                 };
                                 if sink.send(Packet::PublishAck(ack)).await.is_err() { break; }
                             }
-
-                            // Exactly-once, handshake step 1: route on first sight
-                            // (dedup retransmits), then PUBREC. Delivery completes
-                            // on PUBREL.
                             QoS::ExactlyOnce => {
-                                let packet_id = match p.packet_id {
-                                    Some(pid) => pid,
-                                    None => { warn!(%peer, "QoS 2 PUBLISH without packet id, dropping"); break; }
-                                };
-                                if incoming_qos2.insert(packet_id.get()) {
+                                let Some(packet_id) = p.packet_id else { warn!(%peer, "QoS 2 PUBLISH without packet id"); break; };
+                                if hub.inbound_qos2_seen(id, packet_id.get()) {
                                     let n = hub.publish(&topic, &p.payload, msg_qos, p.retain);
-                                    debug!(%peer, %topic, subscribers = n, "PUBLISH routed (QoS 2)");
+                                    debug!(%peer, %topic, recipients = n, "PUBLISH routed (QoS 2)");
                                 } else {
                                     debug!(%peer, packet_id = packet_id.get(), "duplicate QoS 2 PUBLISH, not re-routed");
                                 }
@@ -312,40 +205,24 @@ where
                         }
                     }
 
-                    // A subscriber acknowledged a QoS 1 delivery we sent it.
+                    // Acknowledgements for messages we (the broker) sent out.
                     Packet::PublishAck(ack) => {
-                        if qos_state.qos1_unacked.remove(&ack.packet_id.get()) {
-                            debug!(%peer, packet_id = ack.packet_id.get(), "PUBACK (QoS 1 confirmed)");
-                        } else {
-                            debug!(%peer, packet_id = ack.packet_id.get(), "PUBACK for unknown packet id");
-                        }
+                        if let Some(id) = session_id { hub.on_puback(id, ack.packet_id.get()); }
                     }
-
-                    // PUBREC: subscriber received our QoS 2 PUBLISH -> send PUBREL.
                     Packet::PublishReceived(rec) => {
-                        let pid = rec.packet_id;
-                        if qos_state.qos2_pubrec.remove(&pid.get()) {
-                            qos_state.qos2_pubcomp.insert(pid.get());
-                        }
-                        debug!(%peer, packet_id = pid.get(), "PUBREC -> PUBREL");
-                        if sink.send(pubrel(pid)).await.is_err() { break; }
+                        // Subscriber received our QoS 2 PUBLISH; the session emits PUBREL.
+                        if let Some(id) = session_id { hub.on_pubrec(id, rec.packet_id.get()); }
                     }
-
-                    // PUBREL: publisher releases its QoS 2 message -> PUBCOMP.
-                    Packet::PublishRelease(rel) => {
-                        let pid = rel.packet_id;
-                        incoming_qos2.remove(&pid.get());
-                        debug!(%peer, packet_id = pid.get(), "PUBREL -> PUBCOMP");
-                        if sink.send(pubcomp(pid)).await.is_err() { break; }
-                    }
-
-                    // PUBCOMP: subscriber completed the QoS 2 handshake.
                     Packet::PublishComplete(comp) => {
-                        if qos_state.qos2_pubcomp.remove(&comp.packet_id.get()) {
-                            debug!(%peer, packet_id = comp.packet_id.get(), "PUBCOMP (QoS 2 confirmed)");
-                        } else {
-                            debug!(%peer, packet_id = comp.packet_id.get(), "PUBCOMP for unknown packet id");
+                        if let Some(id) = session_id { hub.on_pubcomp(id, comp.packet_id.get()); }
+                    }
+
+                    // A publisher releasing its inbound QoS 2 message.
+                    Packet::PublishRelease(rel) => {
+                        if let Some(id) = session_id {
+                            hub.inbound_qos2_release(id, rel.packet_id.get());
                         }
+                        if sink.send(pubcomp(rel.packet_id)).await.is_err() { break; }
                     }
 
                     Packet::PingRequest => {
@@ -355,7 +232,7 @@ where
 
                     Packet::Disconnect(d) => {
                         // A normal DISCONNECT discards the Will; any other reason
-                        // code means "publish my Will" (MQTT 5 §3.14).
+                        // means "publish my Will" (MQTT 5 §3.14).
                         if d.reason_code == DisconnectReasonCode::NormalDisconnection {
                             clean_disconnect = true;
                         }
@@ -369,14 +246,11 @@ where
                 }
             }
 
-            // ---- The hub routed a message to us ----
-            outgoing = rx.recv() => {
+            // ---- The session pushed a packet for us to write ----
+            outgoing = next_outbound(&mut rx) => {
                 match outgoing {
-                    Some(delivery) => {
-                        let packet = build_publish(delivery, &mut qos_state);
-                        if sink.send(packet).await.is_err() { break; }
-                    }
-                    None => break, // our sender was dropped (hub deregistered us)
+                    Some(packet) => { if sink.send(packet).await.is_err() { break; } }
+                    None => break, // our session channel closed (taken over / purged)
                 }
             }
         }
@@ -390,6 +264,9 @@ where
         }
     }
 
-    hub.deregister(id);
+    // Detach the session (keeps or discards it per its expiry interval).
+    if let Some(id) = session_id {
+        hub.detach(id, generation);
+    }
     info!(%peer, "connection closed");
 }

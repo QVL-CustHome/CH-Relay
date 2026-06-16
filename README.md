@@ -44,7 +44,7 @@ with `RELAY_CONFIG`.
 
 ## Roadmap
 
-### V1 — core broker (in progress)
+### V1 — core broker ✅ complete
 - [x] Topic filter matching (`+`, `#`) + shared-subscription parsing (`$share/…`)
 - [x] Config (TOML) + TCP/WebSocket listeners
 - [x] MQTT 5.0 packet codec (`rmqtt-codec`) + handshake: CONNECT→CONNACK, PINGREQ→PINGRESP, DISCONNECT (verified end-to-end)
@@ -55,7 +55,7 @@ with `RELAY_CONFIG`.
 - [x] **Will (LWT)** — published on abnormal disconnect, discarded on a clean DISCONNECT (verified end-to-end)
 - [x] **WebSocket transport** — MQTT-over-WS (HTTP upgrade, `mqtt` subprotocol) for browser/mobile, same broker loop as TCP (verified end-to-end)
 - [x] **QoS 2** (exactly-once) — full PUBREC/PUBREL/PUBCOMP handshake both ways, retransmit-deduplicated on receipt (verified end-to-end)
-- [ ] Sessions (clean start / session expiry)
+- [x] **Sessions** (clean start / session expiry) — per-`client_id` session survives disconnect; `clean_start=false` resumes subscriptions and retransmits unacked QoS 1/2, QoS≥1 messages are queued while offline, `session_present` in CONNACK, expiry purge (verified end-to-end)
 
 > **Codec note:** we use `rmqtt-codec` (from the rmqtt broker project: tokio-util 0.7 / bytes 1.x).
 > `mqttbytes` 0.6 was rejected — its v5 CONNACK encoding omits the mandatory property-length byte;
