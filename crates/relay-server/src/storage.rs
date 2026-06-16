@@ -148,6 +148,18 @@ impl Storage {
         Ok(())
     }
 
+    /// Remove a single persisted subscription of `client_id`.
+    pub fn remove_subscription(&self, client_id: &str, raw: &str) -> Result<(), redb::Error> {
+        let key = format!("{client_id}{SEP}{raw}");
+        let txn = self.db.begin_write()?;
+        {
+            let mut table = txn.open_table(SUBSCRIPTIONS)?;
+            table.remove(key.as_str())?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
     /// Load every durable session with its subscriptions (called at startup).
     pub fn load_sessions(&self) -> Result<Vec<PersistedSession>, redb::Error> {
         let txn = self.db.begin_read()?;

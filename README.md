@@ -49,6 +49,7 @@ with `RELAY_CONFIG`.
 - [x] Config (TOML) + TCP/WebSocket listeners
 - [x] MQTT 5.0 packet codec (`rmqtt-codec`) + handshake: CONNECT→CONNACK, PINGREQ→PINGRESP, DISCONNECT (verified end-to-end)
 - [x] Pub/Sub routing + wildcards: SUBSCRIBE→SUBACK, PUBLISH → matching subscribers (QoS 0 fan-out, verified end-to-end)
+- [x] UNSUBSCRIBE→UNSUBACK — stops delivery, removes the (persisted) subscription (verified end-to-end)
 - [x] **Shared subscriptions** (`$share/group/topic`) — competing consumers / round-robin queue (verified end-to-end)
 - [x] **QoS 1** (at-least-once) — PUBACK to publisher + QoS-1 delivery with per-connection packet ids, granted via SUBACK (verified end-to-end)
 - [x] **Retained messages** — last value per topic, replayed to late subscribers (retain flag set), cleared by an empty payload (verified end-to-end)

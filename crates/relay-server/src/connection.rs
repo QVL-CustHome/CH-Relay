@@ -26,7 +26,8 @@ use futures::{SinkExt, StreamExt};
 use relay_core::{ClientId, Message, QoS, SharedSubscription, TopicFilter};
 use rmqtt_codec::v5::{
     Codec, ConnectAck, ConnectAckReason, DisconnectReasonCode, Packet, PublishAck, PublishAck2,
-    PublishAck2Reason, PublishAckReason, SubscribeAck, SubscribeAckReason,
+    PublishAck2Reason, PublishAckReason, SubscribeAck, SubscribeAckReason, UnsubscribeAck,
+    UnsubscribeAckReason,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
@@ -223,6 +224,27 @@ where
                             hub.inbound_qos2_release(id, rel.packet_id.get());
                         }
                         if sink.send(pubcomp(rel.packet_id)).await.is_err() { break; }
+                    }
+
+                    Packet::Unsubscribe(unsub) => {
+                        let Some(id) = session_id else { warn!(%peer, "UNSUBSCRIBE before CONNECT, dropping"); break; };
+                        let mut status = Vec::with_capacity(unsub.topic_filters.len());
+                        for filter in &unsub.topic_filters {
+                            let existed = hub.unsubscribe(id, filter);
+                            info!(%peer, %filter, existed, "UNSUBSCRIBE");
+                            status.push(if existed {
+                                UnsubscribeAckReason::Success
+                            } else {
+                                UnsubscribeAckReason::NoSubscriptionExisted
+                            });
+                        }
+                        let ack = UnsubscribeAck {
+                            packet_id: unsub.packet_id,
+                            properties: Vec::new(),
+                            reason_string: None,
+                            status,
+                        };
+                        if sink.send(Packet::UnsubscribeAck(ack)).await.is_err() { break; }
                     }
 
                     Packet::PingRequest => {

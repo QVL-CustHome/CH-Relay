@@ -467,6 +467,36 @@ impl Hub {
         self.persist_subscription(id, raw, qos);
     }
 
+    /// Remove a subscription (`raw` is the filter string as sent). Returns
+    /// whether it existed, and clears it from disk for durable sessions.
+    pub fn unsubscribe(&self, id: ClientId, raw: &str) -> bool {
+        let removed = {
+            let mut router = self.inner.router.lock().unwrap();
+            if let Some(shared) = SharedSubscription::parse(raw) {
+                router.unsubscribe_shared(&shared.group, id, shared.filter.as_str())
+            } else {
+                router.unsubscribe(id, raw)
+            }
+        };
+
+        if let Some(storage) = &self.inner.storage {
+            let client_id = {
+                let table = self.inner.sessions.lock().unwrap();
+                table
+                    .by_id
+                    .get(&id)
+                    .filter(|s| s.expiry_secs > 0)
+                    .map(|s| s.client_id.clone())
+            };
+            if let Some(client_id) = client_id {
+                if let Err(e) = storage.remove_subscription(&client_id, raw) {
+                    warn!(%client_id, error = %e, "failed to remove persisted subscription");
+                }
+            }
+        }
+        removed
+    }
+
     /// Replay retained messages matching `filter` to a freshly-subscribed
     /// session, capped at its granted QoS and flagged retained.
     pub fn deliver_retained(&self, id: ClientId, filter: &TopicFilter, granted: QoS) {

@@ -88,13 +88,35 @@ impl Router {
         }
     }
 
-    /// Remove a single normal subscription. No-op if it wasn't there.
-    pub fn unsubscribe(&mut self, client: ClientId, filter: &str) {
+    /// Remove a single normal subscription. Returns whether it existed.
+    pub fn unsubscribe(&mut self, client: ClientId, filter: &str) -> bool {
         if let Some(subs) = self.normal.get_mut(&client) {
+            let before = subs.len();
             subs.retain(|s| s.filter.as_str() != filter);
+            let removed = subs.len() != before;
             if subs.is_empty() {
                 self.normal.remove(&client);
             }
+            removed
+        } else {
+            false
+        }
+    }
+
+    /// Remove a client's membership of a share group for `filter`. Returns
+    /// whether it existed.
+    pub fn unsubscribe_shared(&mut self, group: &str, client: ClientId, filter: &str) -> bool {
+        if let Some(g) = self.shared.get_mut(group) {
+            let before = g.members.len();
+            g.members
+                .retain(|(c, s)| !(*c == client && s.filter.as_str() == filter));
+            let removed = g.members.len() != before;
+            if g.members.is_empty() {
+                self.shared.remove(group);
+            }
+            removed
+        } else {
+            false
         }
     }
 
@@ -225,11 +247,25 @@ mod tests {
         r.subscribe(ClientId(1), filter("a/b"), QoS::AtMostOnce);
         r.subscribe(ClientId(2), filter("a/b"), QoS::AtMostOnce);
 
-        r.unsubscribe(ClientId(1), "a/b");
+        assert!(r.unsubscribe(ClientId(1), "a/b"), "should report the sub existed");
+        assert!(!r.unsubscribe(ClientId(1), "a/b"), "second time it's gone");
         assert_eq!(ids(r.matching_subscribers("a/b")), vec![ClientId(2)]);
 
         r.remove_client(ClientId(2));
         assert!(r.matching_subscribers("a/b").is_empty());
+    }
+
+    #[test]
+    fn unsubscribe_shared_removes_one_member() {
+        let mut r = Router::new();
+        r.subscribe_shared("workers".into(), ClientId(1), filter("jobs"), QoS::AtMostOnce);
+        r.subscribe_shared("workers".into(), ClientId(2), filter("jobs"), QoS::AtMostOnce);
+
+        assert!(r.unsubscribe_shared("workers", ClientId(1), "jobs"));
+        assert!(!r.unsubscribe_shared("workers", ClientId(1), "jobs"));
+        // Only worker 2 remains in the group.
+        assert_eq!(ids(r.route("jobs")), vec![ClientId(2)]);
+        assert_eq!(ids(r.route("jobs")), vec![ClientId(2)]);
     }
 
     #[test]
