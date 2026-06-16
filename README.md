@@ -54,7 +54,7 @@ with `RELAY_CONFIG`.
 - [x] **Retained messages** — last value per topic, replayed to late subscribers (retain flag set), cleared by an empty payload (verified end-to-end)
 - [x] **Will (LWT)** — published on abnormal disconnect, discarded on a clean DISCONNECT (verified end-to-end)
 - [x] **WebSocket transport** — MQTT-over-WS (HTTP upgrade, `mqtt` subprotocol) for browser/mobile, same broker loop as TCP (verified end-to-end)
-- [ ] QoS 2 acknowledgement flow (PUBREC / PUBREL / PUBCOMP)
+- [x] **QoS 2** (exactly-once) — full PUBREC/PUBREL/PUBCOMP handshake both ways, retransmit-deduplicated on receipt (verified end-to-end)
 - [ ] Sessions (clean start / session expiry)
 
 > **Codec note:** we use `rmqtt-codec` (from the rmqtt broker project: tokio-util 0.7 / bytes 1.x).

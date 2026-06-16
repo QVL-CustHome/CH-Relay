@@ -8,14 +8,17 @@
 //!
 //! ## QoS
 //!
-//! The broker supports QoS 0 and QoS 1 (at-least-once). QoS 2 is a later step.
+//! The broker supports QoS 0, 1 (at-least-once) and 2 (exactly-once).
 //!
-//! - **Inbound** PUBLISH at QoS 1 is acknowledged to the publisher with PUBACK.
-//! - **Outbound** delivery at QoS 1 carries a packet identifier drawn from this
-//!   connection's own counter; the id is tracked as *unacknowledged* until the
-//!   subscriber returns a PUBACK. (Retransmission across reconnects needs
-//!   persistent sessions — a later step; for now the in-memory tracking lets us
-//!   accept and clear the PUBACK correctly.)
+//! - **Inbound** PUBLISH at QoS 1 is PUBACK'd; at QoS 2 it gets the
+//!   PUBREC→PUBREL→PUBCOMP handshake, and is routed only on first receipt (the
+//!   packet id is remembered until PUBREL so a retransmitted PUBLISH is not
+//!   delivered twice).
+//! - **Outbound** delivery at QoS ≥ 1 carries a packet id drawn from this
+//!   connection's own counter, tracked until the matching PUBACK (QoS 1) or
+//!   PUBREC/PUBCOMP (QoS 2) returns. (Retransmission across reconnects needs
+//!   persistent sessions — a later step; the in-memory tracking drives the live
+//!   handshake correctly.)
 
 use std::collections::HashSet;
 use std::num::NonZeroU16;
@@ -24,8 +27,9 @@ use futures::{SinkExt, StreamExt};
 use relay_core::{Message, QoS, SharedSubscription, TopicFilter};
 use rmqtt_codec::types::Publish;
 use rmqtt_codec::v5::{
-    Codec, ConnectAck, ConnectAckReason, DisconnectReasonCode, Packet, PublishAck,
-    PublishAckReason, PublishProperties, QoS as WireQoS, SubscribeAck, SubscribeAckReason,
+    Codec, ConnectAck, ConnectAckReason, DisconnectReasonCode, Packet, PublishAck, PublishAck2,
+    PublishAck2Reason, PublishAckReason, PublishProperties, QoS as WireQoS, SubscribeAck,
+    SubscribeAckReason,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::codec::Framed;
@@ -36,22 +40,31 @@ use crate::hub::{Delivery, Hub};
 /// Maximum inbound packet size we accept (256 KiB); 0 outbound = unlimited.
 const MAX_INBOUND_SIZE: u32 = 256 * 1024;
 
-/// Highest QoS the broker currently grants/delivers. QoS 2 is a later step.
-const MAX_QOS: QoS = QoS::AtLeastOnce;
+/// Highest QoS the broker grants/delivers.
+const MAX_QOS: QoS = QoS::ExactlyOnce;
 
-/// Per-connection state for QoS > 0 delivery to this client.
+/// Per-connection state for QoS > 0 delivery *to* this client.
+///
+/// QoS 1 awaits a single PUBACK. QoS 2 is the four-packet handshake: we send
+/// PUBLISH and await PUBREC; on PUBREC we send PUBREL and await PUBCOMP.
 struct OutboundQos {
     /// Next packet identifier to hand out (1..=65535, never 0).
     next_id: u16,
-    /// Packet ids delivered at QoS 1 and not yet PUBACK'd by this client.
-    unacked: HashSet<u16>,
+    /// QoS 1 ids delivered and not yet PUBACK'd by this client.
+    qos1_unacked: HashSet<u16>,
+    /// QoS 2 ids delivered, awaiting PUBREC.
+    qos2_pubrec: HashSet<u16>,
+    /// QoS 2 ids we've sent PUBREL for, awaiting PUBCOMP.
+    qos2_pubcomp: HashSet<u16>,
 }
 
 impl OutboundQos {
     fn new() -> Self {
         Self {
             next_id: 1,
-            unacked: HashSet::new(),
+            qos1_unacked: HashSet::new(),
+            qos2_pubrec: HashSet::new(),
+            qos2_pubcomp: HashSet::new(),
         }
     }
 
@@ -91,16 +104,52 @@ fn granted_reason(q: QoS) -> SubscribeAckReason {
     }
 }
 
+/// PUBREC — acknowledges receipt of a QoS 2 PUBLISH (handshake step 2).
+fn pubrec(packet_id: NonZeroU16) -> Packet {
+    Packet::PublishReceived(PublishAck {
+        packet_id,
+        reason_code: PublishAckReason::Success,
+        properties: Vec::new(),
+        reason_string: None,
+    })
+}
+
+/// PUBREL — releases a QoS 2 message (handshake step 3).
+fn pubrel(packet_id: NonZeroU16) -> Packet {
+    Packet::PublishRelease(PublishAck2 {
+        packet_id,
+        reason_code: PublishAck2Reason::Success,
+        properties: Vec::new(),
+        reason_string: None,
+    })
+}
+
+/// PUBCOMP — completes a QoS 2 handshake (step 4).
+fn pubcomp(packet_id: NonZeroU16) -> Packet {
+    Packet::PublishComplete(PublishAck2 {
+        packet_id,
+        reason_code: PublishAck2Reason::Success,
+        properties: Vec::new(),
+        reason_string: None,
+    })
+}
+
 /// Turn a routed [`Delivery`] into a PUBLISH packet for this connection,
-/// stamping a packet id (and tracking it) when delivering at QoS 1.
+/// stamping a packet id (and starting the QoS 1/2 tracking) as needed.
 fn build_publish(delivery: Delivery, qos_state: &mut OutboundQos) -> Packet {
     let qos = delivery.qos.min(MAX_QOS);
-    let packet_id = if qos == QoS::AtMostOnce {
-        None
-    } else {
-        let id = qos_state.allocate();
-        qos_state.unacked.insert(id.get());
-        Some(id)
+    let packet_id = match qos {
+        QoS::AtMostOnce => None,
+        QoS::AtLeastOnce => {
+            let id = qos_state.allocate();
+            qos_state.qos1_unacked.insert(id.get());
+            Some(id)
+        }
+        QoS::ExactlyOnce => {
+            let id = qos_state.allocate();
+            qos_state.qos2_pubrec.insert(id.get());
+            Some(id)
+        }
     };
 
     Packet::Publish(Box::new(Publish {
@@ -129,6 +178,9 @@ where
     let (mut sink, mut stream) = Framed::new(io, Codec::new(MAX_INBOUND_SIZE, 0)).split();
     let mut connected = false;
     let mut qos_state = OutboundQos::new();
+    // QoS 2 packet ids received from this client (as a publisher), awaiting
+    // PUBREL — used to deliver the message exactly once despite retransmits.
+    let mut incoming_qos2: HashSet<u16> = HashSet::new();
     // The client's Will, published if the connection ends *without* a clean
     // DISCONNECT (network drop, protocol error, or DISCONNECT-with-Will).
     let mut will: Option<Message> = None;
@@ -217,10 +269,21 @@ where
                         let topic = p.topic.to_string();
                         let msg_qos = wire_to_core(p.qos);
 
-                        // QoS 1: acknowledge receipt to the publisher with PUBACK.
-                        // (QoS 2's PUBREC/PUBREL/PUBCOMP handshake is a later step.)
-                        if msg_qos == QoS::AtLeastOnce {
-                            if let Some(packet_id) = p.packet_id {
+                        match msg_qos {
+                            // Fire-and-forget: just route it.
+                            QoS::AtMostOnce => {
+                                let n = hub.publish(&topic, &p.payload, msg_qos, p.retain);
+                                debug!(%peer, %topic, subscribers = n, "PUBLISH routed (QoS 0)");
+                            }
+
+                            // At-least-once: route, then PUBACK the publisher.
+                            QoS::AtLeastOnce => {
+                                let packet_id = match p.packet_id {
+                                    Some(pid) => pid,
+                                    None => { warn!(%peer, "QoS 1 PUBLISH without packet id, dropping"); break; }
+                                };
+                                let n = hub.publish(&topic, &p.payload, msg_qos, p.retain);
+                                debug!(%peer, %topic, subscribers = n, "PUBLISH routed (QoS 1)");
                                 let ack = PublishAck {
                                     packet_id,
                                     reason_code: PublishAckReason::Success,
@@ -228,22 +291,60 @@ where
                                     reason_string: None,
                                 };
                                 if sink.send(Packet::PublishAck(ack)).await.is_err() { break; }
-                            } else {
-                                warn!(%peer, "QoS 1 PUBLISH without packet id, dropping");
-                                break;
+                            }
+
+                            // Exactly-once, handshake step 1: route on first sight
+                            // (dedup retransmits), then PUBREC. Delivery completes
+                            // on PUBREL.
+                            QoS::ExactlyOnce => {
+                                let packet_id = match p.packet_id {
+                                    Some(pid) => pid,
+                                    None => { warn!(%peer, "QoS 2 PUBLISH without packet id, dropping"); break; }
+                                };
+                                if incoming_qos2.insert(packet_id.get()) {
+                                    let n = hub.publish(&topic, &p.payload, msg_qos, p.retain);
+                                    debug!(%peer, %topic, subscribers = n, "PUBLISH routed (QoS 2)");
+                                } else {
+                                    debug!(%peer, packet_id = packet_id.get(), "duplicate QoS 2 PUBLISH, not re-routed");
+                                }
+                                if sink.send(pubrec(packet_id)).await.is_err() { break; }
                             }
                         }
-
-                        let n = hub.publish(&topic, &p.payload, msg_qos, p.retain);
-                        debug!(%peer, %topic, ?msg_qos, subscribers = n, "PUBLISH routed");
                     }
 
                     // A subscriber acknowledged a QoS 1 delivery we sent it.
                     Packet::PublishAck(ack) => {
-                        if qos_state.unacked.remove(&ack.packet_id.get()) {
-                            debug!(%peer, packet_id = ack.packet_id.get(), "PUBACK (delivery confirmed)");
+                        if qos_state.qos1_unacked.remove(&ack.packet_id.get()) {
+                            debug!(%peer, packet_id = ack.packet_id.get(), "PUBACK (QoS 1 confirmed)");
                         } else {
                             debug!(%peer, packet_id = ack.packet_id.get(), "PUBACK for unknown packet id");
+                        }
+                    }
+
+                    // PUBREC: subscriber received our QoS 2 PUBLISH -> send PUBREL.
+                    Packet::PublishReceived(rec) => {
+                        let pid = rec.packet_id;
+                        if qos_state.qos2_pubrec.remove(&pid.get()) {
+                            qos_state.qos2_pubcomp.insert(pid.get());
+                        }
+                        debug!(%peer, packet_id = pid.get(), "PUBREC -> PUBREL");
+                        if sink.send(pubrel(pid)).await.is_err() { break; }
+                    }
+
+                    // PUBREL: publisher releases its QoS 2 message -> PUBCOMP.
+                    Packet::PublishRelease(rel) => {
+                        let pid = rel.packet_id;
+                        incoming_qos2.remove(&pid.get());
+                        debug!(%peer, packet_id = pid.get(), "PUBREL -> PUBCOMP");
+                        if sink.send(pubcomp(pid)).await.is_err() { break; }
+                    }
+
+                    // PUBCOMP: subscriber completed the QoS 2 handshake.
+                    Packet::PublishComplete(comp) => {
+                        if qos_state.qos2_pubcomp.remove(&comp.packet_id.get()) {
+                            debug!(%peer, packet_id = comp.packet_id.get(), "PUBCOMP (QoS 2 confirmed)");
+                        } else {
+                            debug!(%peer, packet_id = comp.packet_id.get(), "PUBCOMP for unknown packet id");
                         }
                     }
 
