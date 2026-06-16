@@ -208,6 +208,31 @@ fn encode_dead_letter(client_id: &str, topic: &str, reason: &str, attempts: u32,
     out
 }
 
+/// Serialize a logged event. Layout: `ts(u64) qos(u8) topic_len(u16) topic
+/// payload`. The offset is the storage key, not part of the blob.
+fn encode_event(topic: &str, qos: u8, payload: &Bytes) -> Vec<u8> {
+    let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let mut out = Vec::new();
+    out.extend_from_slice(&ts.to_be_bytes());
+    out.push(qos);
+    out.extend_from_slice(&(topic.len() as u16).to_be_bytes());
+    out.extend_from_slice(topic.as_bytes());
+    out.extend_from_slice(payload);
+    out
+}
+
+/// Decode a logged event blob into `(topic, payload, qos)`.
+fn decode_event(blob: &[u8]) -> Option<(String, Bytes, QoS)> {
+    let mut c = std::io::Cursor::new(blob);
+    let _ts = read_bytes(&mut c, 8)?;
+    let qos = QoS::from_u8(read_u8(&mut c)?).unwrap_or(QoS::AtMostOnce);
+    let topic_len = read_u16(&mut c)? as usize;
+    let topic = read_bytes(&mut c, topic_len)?;
+    let pos = c.position() as usize;
+    let payload = Bytes::copy_from_slice(c.get_ref().get(pos..)?);
+    Some((String::from_utf8_lossy(&topic).into_owned(), payload, qos))
+}
+
 fn read_u8(c: &mut std::io::Cursor<&[u8]>) -> Option<u8> {
     let pos = c.position() as usize;
     let b = c.get_ref().get(pos).copied()?;
@@ -473,13 +498,16 @@ struct Inner {
     sessions: Mutex<SessionTable>,
     storage: Option<Storage>,
     retry: RetryConfig,
+    /// Event-log retention (max rows; 0 disables logging). Replay reads this log.
+    event_log_max: u64,
 }
 
 impl Hub {
     /// Build the broker state. With a [`Storage`], retained messages are loaded
     /// from disk at startup and persisted on change; without one, Relay is fully
-    /// in-memory. `retry` governs redelivery back-off and dead-lettering.
-    pub fn new(storage: Option<Storage>, retry: RetryConfig) -> Self {
+    /// in-memory. `retry` governs redelivery back-off and dead-lettering;
+    /// `event_log_max` bounds the replayable event log (0 disables it).
+    pub fn new(storage: Option<Storage>, retry: RetryConfig, event_log_max: u64) -> Self {
         let now = Instant::now();
         let mut retained = RetainedStore::new();
         let mut router = Router::new();
@@ -549,6 +577,7 @@ impl Hub {
                 sessions: Mutex::new(table),
                 storage,
                 retry,
+                event_log_max,
             }),
         };
 
@@ -909,6 +938,17 @@ impl Hub {
             }
         }
 
+        // Append to the replayable event log (application topics only; `$`
+        // control/system topics such as `$dlq/...` are not journalled).
+        if self.inner.event_log_max > 0 && !topic.starts_with('$') {
+            if let Some(storage) = &self.inner.storage {
+                let blob = encode_event(topic, msg_qos as u8, payload);
+                if let Err(e) = storage.append_event(&blob, self.inner.event_log_max) {
+                    warn!(%topic, error = %e, "failed to log event");
+                }
+            }
+        }
+
         // Resolve targets, releasing the router lock before touching sessions.
         let targets = { self.inner.router.lock().unwrap().route(topic) };
         if targets.is_empty() {
@@ -935,6 +975,45 @@ impl Hub {
             self.write_inflight(&client_id, &blob);
         }
         delivered
+    }
+
+    /// Replay logged events whose offset is >= `from` and whose topic matches
+    /// `filter`, to the requesting session. Each replayed PUBLISH is sent at
+    /// QoS 0 (a bulk read, outside the live delivery guarantees) and tagged with
+    /// its offset in the `x-replay-offset` user property. Returns how many were
+    /// replayed. A no-op without persistence (the event log lives on disk).
+    pub fn replay(&self, id: ClientId, from: u64, filter: &TopicFilter) -> usize {
+        let Some(storage) = &self.inner.storage else { return 0 };
+        let events = match storage.load_events(from) {
+            Ok(e) => e,
+            Err(e) => {
+                warn!(error = %e, "failed to read event log for replay");
+                return 0;
+            }
+        };
+        let mut table = self.inner.sessions.lock().unwrap();
+        let Some(session) = table.by_id.get_mut(&id) else { return 0 };
+        let mut replayed = 0;
+        for (offset, blob) in events {
+            let Some((topic, payload, _qos)) = decode_event(&blob) else { continue };
+            if !filter.matches(&topic) {
+                continue;
+            }
+            let mut properties = PublishProperties::default();
+            properties.user_properties = vec![("x-replay-offset".into(), offset.to_string().into())];
+            let p = Publish {
+                dup: false,
+                retain: false,
+                qos: WireQoS::AtMostOnce,
+                topic: topic.into(),
+                packet_id: None,
+                payload,
+                properties: Some(properties),
+            };
+            session.send(Packet::Publish(Box::new(p)));
+            replayed += 1;
+        }
+        replayed
     }
 
     // ---- acknowledgements for messages we sent (outbound QoS) ----
@@ -999,6 +1078,6 @@ impl Hub {
 
 impl Default for Hub {
     fn default() -> Self {
-        Self::new(None, RetryConfig::default())
+        Self::new(None, RetryConfig::default(), 0)
     }
 }

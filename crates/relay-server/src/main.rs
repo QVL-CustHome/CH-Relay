@@ -61,7 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         base: Duration::from_secs(config.retry_base_secs.max(1)),
         cap: Duration::from_secs(config.retry_max_secs.max(1)),
     };
-    let hub = Hub::new(storage, retry);
+    let hub = Hub::new(storage, retry, config.event_log_max);
 
     loop {
         tokio::select! {

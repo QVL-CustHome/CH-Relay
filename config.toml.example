@@ -21,3 +21,9 @@ max_delivery_attempts = 5
 retry_base_secs = 5
 # Upper bound on the redelivery back-off, in seconds.
 retry_max_secs = 60
+
+# Replayable event log: every published application message is journalled with a
+# global offset (requires data_dir). A client replays from an offset by
+# publishing to `$replay/{from_offset}/{topic_filter}`. This caps the log size;
+# the oldest events are pruned beyond it. Set to 0 to disable the log (no replay).
+event_log_max = 100000

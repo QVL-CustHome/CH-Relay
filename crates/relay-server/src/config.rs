@@ -24,6 +24,10 @@ pub struct Config {
     pub retry_base_secs: u64,
     /// Upper bound on the redelivery back-off, in seconds.
     pub retry_max_secs: u64,
+    /// Maximum number of messages kept in the replayable event log (oldest are
+    /// pruned beyond this). `0` disables the event log (no replay). Requires
+    /// `data_dir`.
+    pub event_log_max: u64,
 }
 
 impl Default for Config {
@@ -36,6 +40,7 @@ impl Default for Config {
             max_delivery_attempts: 5,
             retry_base_secs: 5,
             retry_max_secs: 60,
+            event_log_max: 100_000,
         }
     }
 }

@@ -70,6 +70,15 @@ fn pubcomp(packet_id: NonZeroU16) -> Packet {
     })
 }
 
+/// Parse a `$replay/{from_offset}/{filter}` control topic (the `$replay/`
+/// prefix already stripped) into a starting offset and a validated topic filter.
+fn parse_replay(rest: &str) -> Option<(u64, TopicFilter)> {
+    let (from, filter) = rest.split_once('/')?;
+    let from = from.parse::<u64>().ok()?;
+    let filter = TopicFilter::parse(filter)?;
+    Some((from, filter))
+}
+
 /// Await the next outbound packet, or never resolve if not yet connected (no
 /// session channel exists before CONNECT).
 async fn next_outbound(rx: &mut Option<mpsc::UnboundedReceiver<Packet>>) -> Option<Packet> {
@@ -176,32 +185,60 @@ where
                         let topic = p.topic.to_string();
                         let msg_qos = hub::to_core_qos(p.qos);
 
-                        match msg_qos {
-                            QoS::AtMostOnce => {
-                                let n = hub.publish(&topic, &p.payload, msg_qos, p.retain);
-                                debug!(%peer, %topic, recipients = n, "PUBLISH routed (QoS 0)");
-                            }
-                            QoS::AtLeastOnce => {
-                                let Some(packet_id) = p.packet_id else { warn!(%peer, "QoS 1 PUBLISH without packet id"); break; };
-                                let n = hub.publish(&topic, &p.payload, msg_qos, p.retain);
-                                debug!(%peer, %topic, recipients = n, "PUBLISH routed (QoS 1)");
-                                let ack = PublishAck {
-                                    packet_id,
-                                    reason_code: PublishAckReason::Success,
-                                    properties: Vec::new(),
-                                    reason_string: None,
-                                };
-                                if sink.send(Packet::PublishAck(ack)).await.is_err() { break; }
-                            }
-                            QoS::ExactlyOnce => {
-                                let Some(packet_id) = p.packet_id else { warn!(%peer, "QoS 2 PUBLISH without packet id"); break; };
-                                if hub.inbound_qos2_seen(id, packet_id.get()) {
-                                    let n = hub.publish(&topic, &p.payload, msg_qos, p.retain);
-                                    debug!(%peer, %topic, recipients = n, "PUBLISH routed (QoS 2)");
-                                } else {
-                                    debug!(%peer, packet_id = packet_id.get(), "duplicate QoS 2 PUBLISH, not re-routed");
+                        // `$replay/{from}/{filter}` is a control request: stream
+                        // logged events back to this client instead of routing.
+                        if let Some(rest) = topic.strip_prefix("$replay/") {
+                            match parse_replay(rest) {
+                                Some((from, filter)) => {
+                                    let n = hub.replay(id, from, &filter);
+                                    info!(%peer, from, filter = %filter.as_str(), replayed = n, "REPLAY");
                                 }
-                                if sink.send(pubrec(packet_id)).await.is_err() { break; }
+                                None => warn!(%peer, %topic, "invalid $replay request"),
+                            }
+                            // Acknowledge the control publish so its QoS handshake completes.
+                            match (msg_qos, p.packet_id) {
+                                (QoS::AtLeastOnce, Some(packet_id)) => {
+                                    let ack = PublishAck {
+                                        packet_id,
+                                        reason_code: PublishAckReason::Success,
+                                        properties: Vec::new(),
+                                        reason_string: None,
+                                    };
+                                    if sink.send(Packet::PublishAck(ack)).await.is_err() { break; }
+                                }
+                                (QoS::ExactlyOnce, Some(packet_id)) => {
+                                    if sink.send(pubrec(packet_id)).await.is_err() { break; }
+                                }
+                                _ => {}
+                            }
+                        } else {
+                            match msg_qos {
+                                QoS::AtMostOnce => {
+                                    let n = hub.publish(&topic, &p.payload, msg_qos, p.retain);
+                                    debug!(%peer, %topic, recipients = n, "PUBLISH routed (QoS 0)");
+                                }
+                                QoS::AtLeastOnce => {
+                                    let Some(packet_id) = p.packet_id else { warn!(%peer, "QoS 1 PUBLISH without packet id"); break; };
+                                    let n = hub.publish(&topic, &p.payload, msg_qos, p.retain);
+                                    debug!(%peer, %topic, recipients = n, "PUBLISH routed (QoS 1)");
+                                    let ack = PublishAck {
+                                        packet_id,
+                                        reason_code: PublishAckReason::Success,
+                                        properties: Vec::new(),
+                                        reason_string: None,
+                                    };
+                                    if sink.send(Packet::PublishAck(ack)).await.is_err() { break; }
+                                }
+                                QoS::ExactlyOnce => {
+                                    let Some(packet_id) = p.packet_id else { warn!(%peer, "QoS 2 PUBLISH without packet id"); break; };
+                                    if hub.inbound_qos2_seen(id, packet_id.get()) {
+                                        let n = hub.publish(&topic, &p.payload, msg_qos, p.retain);
+                                        debug!(%peer, %topic, recipients = n, "PUBLISH routed (QoS 2)");
+                                    } else {
+                                        debug!(%peer, packet_id = packet_id.get(), "duplicate QoS 2 PUBLISH, not re-routed");
+                                    }
+                                    if sink.send(pubrec(packet_id)).await.is_err() { break; }
+                                }
                             }
                         }
                     }

@@ -19,6 +19,11 @@
 //!   storage layer stores and returns the bytes verbatim; only the hub knows the
 //!   encoding. Restored on reconnect so unacknowledged messages survive a
 //!   broker restart.
+//! - `dead_letters` — key = auto-incrementing sequence, value = an opaque hub
+//!   blob. Append-only record of undeliverable messages, for replay.
+//! - `events` — key = global monotonic offset, value = an opaque hub blob (one
+//!   per published message). Append-only with bounded retention; the source of
+//!   truth for offset-based replay.
 //!
 //! Writes are durable (each is its own committed transaction); the store is
 //! loaded back into memory at startup.
@@ -29,7 +34,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use bytes::Bytes;
-use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use relay_core::{Message, QoS};
 
 const RETAINED: TableDefinition<&str, &[u8]> = TableDefinition::new("retained");
@@ -39,6 +44,10 @@ const INFLIGHT: TableDefinition<&str, &[u8]> = TableDefinition::new("inflight");
 /// Dead-lettered messages, keyed by an auto-incrementing sequence (insertion
 /// order) so they can be replayed later. Value is an opaque blob from the hub.
 const DEAD_LETTERS: TableDefinition<u64, &[u8]> = TableDefinition::new("dead_letters");
+/// The event log: every published message keyed by a global, monotonic offset.
+/// Append-only with bounded retention (oldest offsets pruned). Value is an
+/// opaque blob from the hub. Replay reads a range from a starting offset.
+const EVENTS: TableDefinition<u64, &[u8]> = TableDefinition::new("events");
 
 /// Separator between `client_id` and the raw filter in a subscription key.
 const SEP: char = '\u{0}';
@@ -67,6 +76,7 @@ impl Storage {
         txn.open_table(SUBSCRIPTIONS)?;
         txn.open_table(INFLIGHT)?;
         txn.open_table(DEAD_LETTERS)?;
+        txn.open_table(EVENTS)?;
         txn.commit()?;
         Ok(Storage { db })
     }
@@ -217,6 +227,43 @@ impl Storage {
         }
         txn.commit()?;
         Ok(())
+    }
+
+    /// Append a published message to the event log, returning its global offset.
+    /// `retention` bounds the log: once it would exceed `retention` rows, the
+    /// oldest offsets are pruned (0 = unbounded). Offsets are never reused.
+    pub fn append_event(&self, blob: &[u8], retention: u64) -> Result<u64, redb::Error> {
+        let txn = self.db.begin_write()?;
+        let offset;
+        {
+            let mut table = txn.open_table(EVENTS)?;
+            offset = match table.last()? {
+                Some((k, _)) => k.value().wrapping_add(1),
+                None => 0,
+            };
+            table.insert(offset, blob)?;
+            if retention > 0 {
+                while table.len()? > retention {
+                    let Some(oldest) = table.first()?.map(|(k, _)| k.value()) else { break };
+                    table.remove(oldest)?;
+                }
+            }
+        }
+        txn.commit()?;
+        Ok(offset)
+    }
+
+    /// Read logged events with offset >= `from`, in offset order, for replay.
+    /// Returns `(offset, opaque blob)` pairs for the hub to decode and filter.
+    pub fn load_events(&self, from: u64) -> Result<Vec<(u64, Vec<u8>)>, redb::Error> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(EVENTS)?;
+        let mut out = Vec::new();
+        for row in table.range(from..)? {
+            let (k, v) = row?;
+            out.push((k.value(), v.value().to_vec()));
+        }
+        Ok(out)
     }
 
     /// Load every durable session with its subscriptions (called at startup).
