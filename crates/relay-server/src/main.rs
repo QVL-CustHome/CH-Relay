@@ -7,6 +7,7 @@
 
 mod config;
 mod connection;
+mod dashboard;
 mod hub;
 mod storage;
 mod tls;
@@ -94,6 +95,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     } else {
         info!("TLS disabled (set tls_cert + tls_key to enable mqtts)");
+    }
+
+    // Optional embedded monitoring dashboard.
+    if let Some(http_addr) = config.http_addr {
+        let http_listener = TcpListener::bind(http_addr).await?;
+        info!("relay dashboard on http://{http_addr}");
+        let hub = hub.clone();
+        tokio::spawn(dashboard::serve(http_listener, hub));
+    } else {
+        info!("dashboard disabled (set http_addr to enable)");
     }
 
     loop {

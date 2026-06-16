@@ -35,6 +35,8 @@ pub struct Config {
     pub tls_cert: Option<PathBuf>,
     /// PEM private key for the mqtts listener.
     pub tls_key: Option<PathBuf>,
+    /// Address of the embedded HTTP monitoring dashboard. Unset = disabled.
+    pub http_addr: Option<SocketAddr>,
 }
 
 impl Default for Config {
@@ -51,6 +53,7 @@ impl Default for Config {
             tls_addr: None,
             tls_cert: None,
             tls_key: None,
+            http_addr: None,
         }
     }
 }

@@ -266,6 +266,30 @@ impl Storage {
         Ok(out)
     }
 
+    /// Number of dead-lettered messages currently stored (for monitoring).
+    pub fn dead_letter_count(&self) -> Result<u64, redb::Error> {
+        let txn = self.db.begin_read()?;
+        Ok(txn.open_table(DEAD_LETTERS)?.len()?)
+    }
+
+    /// Number of events currently retained in the log (for monitoring).
+    pub fn event_count(&self) -> Result<u64, redb::Error> {
+        let txn = self.db.begin_read()?;
+        Ok(txn.open_table(EVENTS)?.len()?)
+    }
+
+    /// The next offset that would be assigned (i.e. one past the newest), for
+    /// monitoring the log's high-water mark.
+    pub fn next_offset(&self) -> Result<u64, redb::Error> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(EVENTS)?;
+        let next = match table.last()? {
+            Some((k, _)) => k.value().wrapping_add(1),
+            None => 0,
+        };
+        Ok(next)
+    }
+
     /// Load every durable session with its subscriptions (called at startup).
     pub fn load_sessions(&self) -> Result<Vec<PersistedSession>, redb::Error> {
         let txn = self.db.begin_read()?;

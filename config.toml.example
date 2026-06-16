@@ -34,3 +34,8 @@ event_log_max = 100000
 # tls_addr = "0.0.0.0:8883"
 # tls_cert = '/etc/relay/cert.pem'
 # tls_key  = '/etc/relay/key.pem'
+
+# Embedded monitoring dashboard (built into the broker, no separate service).
+# Set an address to enable it: `/` serves a live HTML page, `/stats` returns
+# JSON (clients, subscriptions, retained, dead-letters, event-log offset).
+# http_addr = "127.0.0.1:8080"

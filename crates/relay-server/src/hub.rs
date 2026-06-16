@@ -485,6 +485,17 @@ pub struct Connected {
     pub session_present: bool,
 }
 
+/// A point-in-time snapshot of broker activity, for the monitoring dashboard.
+pub struct Stats {
+    pub clients_online: usize,
+    pub clients_total: usize,
+    pub subscriptions: usize,
+    pub retained: usize,
+    pub dead_letters: u64,
+    pub events: u64,
+    pub next_offset: u64,
+}
+
 /// Cloneable handle to the shared broker state.
 #[derive(Clone)]
 pub struct Hub {
@@ -1055,6 +1066,26 @@ impl Hub {
         if let Some((client_id, blob)) = snapshot {
             self.write_inflight(&client_id, &blob);
         }
+    }
+
+    /// Snapshot current broker activity for the monitoring dashboard.
+    pub fn stats(&self) -> Stats {
+        let (clients_online, clients_total) = {
+            let table = self.inner.sessions.lock().unwrap();
+            let online = table.by_id.values().filter(|s| s.tx.is_some()).count();
+            (online, table.by_id.len())
+        };
+        let subscriptions = self.inner.router.lock().unwrap().subscription_count();
+        let retained = self.inner.retained.lock().unwrap().len();
+        let (dead_letters, events, next_offset) = match &self.inner.storage {
+            Some(s) => (
+                s.dead_letter_count().unwrap_or(0),
+                s.event_count().unwrap_or(0),
+                s.next_offset().unwrap_or(0),
+            ),
+            None => (0, 0, 0),
+        };
+        Stats { clients_online, clients_total, subscriptions, retained, dead_letters, events, next_offset }
     }
 
     // ---- inbound QoS 2 dedup (we are the receiver) ----

@@ -129,6 +129,14 @@ impl Router {
         self.shared.retain(|_, g| !g.members.is_empty());
     }
 
+    /// Total active subscriptions: normal subscriptions plus shared-group
+    /// memberships. For monitoring.
+    pub fn subscription_count(&self) -> usize {
+        let normal: usize = self.normal.values().map(|v| v.len()).sum();
+        let shared: usize = self.shared.values().map(|g| g.members.len()).sum();
+        normal + shared
+    }
+
     /// The distinct **normal** subscribers matching `topic`, with the granted
     /// QoS of their matching subscription (the maximum granted QoS if several of
     /// a client's filters match). Sorted by [`ClientId`].
@@ -239,6 +247,18 @@ mod tests {
             r.matching_subscribers("a/b"),
             vec![(ClientId(1), QoS::AtLeastOnce)]
         );
+    }
+
+    #[test]
+    fn subscription_count_tracks_normal_and_shared() {
+        let mut r = Router::new();
+        assert_eq!(r.subscription_count(), 0);
+        r.subscribe(ClientId(1), filter("a/b"), QoS::AtMostOnce);
+        r.subscribe(ClientId(2), filter("a/#"), QoS::AtMostOnce);
+        r.subscribe_shared("g".into(), ClientId(3), filter("jobs"), QoS::AtMostOnce);
+        assert_eq!(r.subscription_count(), 3);
+        r.unsubscribe(ClientId(1), "a/b");
+        assert_eq!(r.subscription_count(), 2);
     }
 
     #[test]

@@ -28,8 +28,9 @@ Two crates (mirrors AIGate's `*-core` / `*-server` split):
 
 - **`relay-core`** — the broker engine: topic matching, subscriptions, retained
   store, sessions, QoS state machine. **No I/O**, fully unit-testable.
-- **`relay-server`** — the tokio daemon: TCP + WebSocket listeners, MQTT packet
-  codec, drives `relay-core`. Produces the `relay` binary.
+- **`relay-server`** — the tokio daemon: TCP / WebSocket / TLS listeners, MQTT
+  packet codec, on-disk store, redelivery + dead-letter timer, event log, and an
+  embedded monitoring dashboard. Drives `relay-core`. Produces the `relay` binary.
 
 ## Run
 
@@ -62,14 +63,14 @@ with `RELAY_CONFIG`.
 > `mqttbytes` 0.6 was rejected — its v5 CONNACK encoding omits the mandatory property-length byte;
 > `mqtt-v5` 0.1 was rejected — it pins the obsolete tokio 0.2 / bytes 0.5 ecosystem.
 
-### V2 — the extras (in progress)
+### V2 — the extras ✅ complete
 - [x] On-disk persistence — **retained messages** survive restart (`redb` embedded store, opt-in via `data_dir`, verified end-to-end)
 - [x] On-disk persistence — **durable sessions**: a `clean_start=false` client's identity + subscriptions survive a restart (`session_present` after reload, verified end-to-end)
 - [x] On-disk persistence — **in-flight QoS 1/2 queues**: unacknowledged outbound messages (including those queued while a durable client is offline) survive a restart and are retransmitted on reconnect (verified end-to-end)
 - [x] **Dead-letter queue + retry with back-off** — unacknowledged QoS 1/2 messages are redelivered with exponential back-off; after `max_delivery_attempts` (or when a durable session expires undelivered) they are republished on `$dlq/{client}/{topic}` and persisted for replay (verified end-to-end)
 - [x] **Replay / event-sourcing from an offset** — every published message is journalled with a global offset (bounded log); a client replays from an offset by publishing `$replay/{from}/{filter}`, receiving the matching events tagged with their offset (verified end-to-end)
 - [x] **TLS (mqtts)** — optional secure listener (rustls/`ring`), enabled by pointing `tls_cert` + `tls_key` at PEM files; same broker loop over the TLS stream (verified end-to-end against a self-signed cert)
-- [ ] HTTP admin API + monitoring dashboard
+- [x] **Embedded monitoring dashboard** — a built-in HTTP endpoint (`http_addr`, no separate service): `/` serves a live page, `/stats` a JSON snapshot (clients, subscriptions, retained, dead-letters, event-log size/offset) (verified end-to-end)
 
 ## Feature mapping (what MQTT 5 gives us out of the box)
 
