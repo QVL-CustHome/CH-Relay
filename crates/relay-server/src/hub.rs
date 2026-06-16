@@ -84,6 +84,89 @@ enum Inflight {
     Qos2AwaitComp(NonZeroU16),
 }
 
+// ---- in-flight queue persistence (opaque blob stored by `storage`) ----
+//
+// Layout: `next_id (u16 BE)` then, per entry, a tag byte followed by its body:
+//   1 = Qos1, 2 = Qos2AwaitRec — `pid(u16) flags(u8) topic_len(u16) topic
+//       payload_len(u32) payload` (flags bit 0 = retain)
+//   3 = Qos2AwaitComp          — `pid(u16)`
+
+fn encode_publish_entry(out: &mut Vec<u8>, tag: u8, p: &Publish) {
+    out.push(tag);
+    let pid = p.packet_id.map(|x| x.get()).unwrap_or(0);
+    out.extend_from_slice(&pid.to_be_bytes());
+    out.push(if p.retain { 1 } else { 0 });
+    let topic = p.topic.as_bytes();
+    out.extend_from_slice(&(topic.len() as u16).to_be_bytes());
+    out.extend_from_slice(topic);
+    out.extend_from_slice(&(p.payload.len() as u32).to_be_bytes());
+    out.extend_from_slice(&p.payload);
+}
+
+/// Decode a persisted in-flight blob into `(next_id, queue)`. Returns `None` on
+/// any malformed input (the session then simply starts with an empty queue).
+fn decode_inflight(blob: &[u8]) -> Option<(u16, VecDeque<Inflight>)> {
+    let mut c = std::io::Cursor::new(blob);
+    let next_id = read_u16(&mut c)?;
+    let mut queue = VecDeque::new();
+    while (c.position() as usize) < blob.len() {
+        let tag = read_u8(&mut c)?;
+        match tag {
+            1 | 2 => {
+                let pid = NonZeroU16::new(read_u16(&mut c)?)?;
+                let retain = read_u8(&mut c)? != 0;
+                let topic_len = read_u16(&mut c)? as usize;
+                let topic = read_bytes(&mut c, topic_len)?;
+                let payload_len = read_u32(&mut c)? as usize;
+                let payload = read_bytes(&mut c, payload_len)?;
+                let wire = if tag == 1 { WireQoS::AtLeastOnce } else { WireQoS::ExactlyOnce };
+                let p = make_publish(
+                    &String::from_utf8_lossy(&topic),
+                    &Bytes::from(payload),
+                    wire,
+                    Some(pid),
+                    retain,
+                    false,
+                );
+                queue.push_back(if tag == 1 {
+                    Inflight::Qos1(p)
+                } else {
+                    Inflight::Qos2AwaitRec(p)
+                });
+            }
+            3 => {
+                let pid = NonZeroU16::new(read_u16(&mut c)?)?;
+                queue.push_back(Inflight::Qos2AwaitComp(pid));
+            }
+            _ => return None,
+        }
+    }
+    Some((next_id, queue))
+}
+
+fn read_u8(c: &mut std::io::Cursor<&[u8]>) -> Option<u8> {
+    let pos = c.position() as usize;
+    let b = c.get_ref().get(pos).copied()?;
+    c.set_position((pos + 1) as u64);
+    Some(b)
+}
+
+fn read_u16(c: &mut std::io::Cursor<&[u8]>) -> Option<u16> {
+    Some(u16::from_be_bytes(read_bytes(c, 2)?.try_into().ok()?))
+}
+
+fn read_u32(c: &mut std::io::Cursor<&[u8]>) -> Option<u32> {
+    Some(u32::from_be_bytes(read_bytes(c, 4)?.try_into().ok()?))
+}
+
+fn read_bytes(c: &mut std::io::Cursor<&[u8]>, n: usize) -> Option<Vec<u8>> {
+    let pos = c.position() as usize;
+    let end = pos.checked_add(n)?;
+    let slice = c.get_ref().get(pos..end)?;
+    c.set_position(end as u64);
+    Some(slice.to_vec())
+}
+
 /// Per-`client_id` session. Survives disconnection (subject to expiry).
 struct Session {
     /// The MQTT client identifier — the persistence key.
@@ -120,6 +203,25 @@ impl Session {
             expiry_secs,
             generation,
         }
+    }
+
+    /// Serialize the packet-id counter and the in-flight queue for persistence
+    /// (see [`decode_inflight`]). An empty queue still records `next_id` so
+    /// packet ids stay monotonic across a restart.
+    fn encode_inflight(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&self.next_id.to_be_bytes());
+        for entry in &self.inflight {
+            match entry {
+                Inflight::Qos1(p) => encode_publish_entry(&mut out, 1, p),
+                Inflight::Qos2AwaitRec(p) => encode_publish_entry(&mut out, 2, p),
+                Inflight::Qos2AwaitComp(pid) => {
+                    out.push(3);
+                    out.extend_from_slice(&pid.get().to_be_bytes());
+                }
+            }
+        }
+        out
     }
 
     fn allocate_id(&mut self) -> NonZeroU16 {
@@ -259,6 +361,12 @@ impl Hub {
                 Err(e) => warn!(error = %e, "failed to load retained messages from disk"),
             }
 
+            // In-flight queues, keyed by client_id (decoded per session below).
+            let inflight = s.load_inflight().unwrap_or_else(|e| {
+                warn!(error = %e, "failed to load in-flight queues from disk");
+                Default::default()
+            });
+
             match s.load_sessions() {
                 Ok(sessions) => {
                     let n = sessions.len();
@@ -273,11 +381,17 @@ impl Hub {
                                 router.subscribe(id, tf, qos);
                             }
                         }
-                        // Re-create the session offline (generation 0).
-                        table.id_of.insert(ps.client_id.clone(), id);
-                        table
-                            .by_id
-                            .insert(id, Session::new(ps.client_id, None, ps.expiry_secs, 0));
+                        // Re-create the session offline (generation 0), restoring
+                        // its in-flight queue + packet-id counter if any.
+                        let mut session = Session::new(ps.client_id.clone(), None, ps.expiry_secs, 0);
+                        if let Some((next_id, queue)) =
+                            inflight.get(&ps.client_id).and_then(|b| decode_inflight(b))
+                        {
+                            session.next_id = next_id;
+                            session.inflight = queue;
+                        }
+                        table.id_of.insert(ps.client_id, id);
+                        table.by_id.insert(id, session);
                         if ps.expiry_secs != NO_EXPIRY {
                             to_expire.push((id, ps.expiry_secs));
                         }
@@ -368,6 +482,26 @@ impl Hub {
             };
             if let Err(e) = r {
                 warn!(%client_id, error = %e, "failed to persist session");
+            }
+        }
+    }
+
+    /// If `session` is durable and persistence is on, snapshot its in-flight
+    /// queue for writing (cheap, CPU-only — meant to be called under the
+    /// sessions lock, with the actual disk write deferred until after unlock).
+    fn snapshot_inflight(&self, session: &Session) -> Option<(String, Vec<u8>)> {
+        if self.inner.storage.is_some() && session.expiry_secs > 0 {
+            Some((session.client_id.clone(), session.encode_inflight()))
+        } else {
+            None
+        }
+    }
+
+    /// Write a previously-snapshotted in-flight blob to disk.
+    fn write_inflight(&self, client_id: &str, blob: &[u8]) {
+        if let Some(storage) = &self.inner.storage {
+            if let Err(e) = storage.put_inflight(client_id, blob) {
+                warn!(%client_id, error = %e, "failed to persist in-flight queue");
             }
         }
     }
@@ -504,11 +638,27 @@ impl Hub {
         if retained.is_empty() {
             return;
         }
-        let mut table = self.inner.sessions.lock().unwrap();
-        if let Some(session) = table.by_id.get_mut(&id) {
-            for msg in retained {
-                session.deliver(&msg.topic, &msg.payload, msg.qos.min(granted), true);
+        let snapshot = {
+            let mut table = self.inner.sessions.lock().unwrap();
+            match table.by_id.get_mut(&id) {
+                Some(session) => {
+                    let mut any_qos_gt0 = false;
+                    for msg in retained {
+                        let effective = msg.qos.min(granted);
+                        any_qos_gt0 |= effective != QoS::AtMostOnce;
+                        session.deliver(&msg.topic, &msg.payload, effective, true);
+                    }
+                    if any_qos_gt0 {
+                        self.snapshot_inflight(session)
+                    } else {
+                        None
+                    }
+                }
+                None => None,
             }
+        };
+        if let Some((client_id, blob)) = snapshot {
+            self.write_inflight(&client_id, &blob);
         }
     }
 
@@ -537,13 +687,24 @@ impl Hub {
         if targets.is_empty() {
             return 0;
         }
-        let mut table = self.inner.sessions.lock().unwrap();
+        let mut to_persist: Vec<(String, Vec<u8>)> = Vec::new();
         let mut delivered = 0;
-        for (id, granted) in targets {
-            if let Some(session) = table.by_id.get_mut(&id) {
-                session.deliver(topic, payload, msg_qos.min(granted), false);
-                delivered += 1;
+        {
+            let mut table = self.inner.sessions.lock().unwrap();
+            for (id, granted) in targets {
+                if let Some(session) = table.by_id.get_mut(&id) {
+                    let effective = msg_qos.min(granted);
+                    session.deliver(topic, payload, effective, false);
+                    delivered += 1;
+                    // Only QoS > 0 changes the in-flight queue.
+                    if effective != QoS::AtMostOnce {
+                        to_persist.extend(self.snapshot_inflight(session));
+                    }
+                }
             }
+        }
+        for (client_id, blob) in to_persist {
+            self.write_inflight(&client_id, &blob);
         }
         delivered
     }
@@ -551,20 +712,41 @@ impl Hub {
     // ---- acknowledgements for messages we sent (outbound QoS) ----
 
     pub fn on_puback(&self, id: ClientId, pid: u16) {
-        if let Some(s) = self.inner.sessions.lock().unwrap().by_id.get_mut(&id) {
-            s.on_puback(pid);
+        let snapshot = {
+            let mut table = self.inner.sessions.lock().unwrap();
+            table.by_id.get_mut(&id).and_then(|s| {
+                s.on_puback(pid);
+                self.snapshot_inflight(s)
+            })
+        };
+        if let Some((client_id, blob)) = snapshot {
+            self.write_inflight(&client_id, &blob);
         }
     }
 
     pub fn on_pubrec(&self, id: ClientId, pid: u16) {
-        if let Some(s) = self.inner.sessions.lock().unwrap().by_id.get_mut(&id) {
-            s.on_pubrec(pid);
+        let snapshot = {
+            let mut table = self.inner.sessions.lock().unwrap();
+            table.by_id.get_mut(&id).and_then(|s| {
+                s.on_pubrec(pid);
+                self.snapshot_inflight(s)
+            })
+        };
+        if let Some((client_id, blob)) = snapshot {
+            self.write_inflight(&client_id, &blob);
         }
     }
 
     pub fn on_pubcomp(&self, id: ClientId, pid: u16) {
-        if let Some(s) = self.inner.sessions.lock().unwrap().by_id.get_mut(&id) {
-            s.on_pubcomp(pid);
+        let snapshot = {
+            let mut table = self.inner.sessions.lock().unwrap();
+            table.by_id.get_mut(&id).and_then(|s| {
+                s.on_pubcomp(pid);
+                self.snapshot_inflight(s)
+            })
+        };
+        if let Some((client_id, blob)) = snapshot {
+            self.write_inflight(&client_id, &blob);
         }
     }
 

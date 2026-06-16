@@ -14,10 +14,14 @@
 //!   `[granted_qos]`. `raw_filter` is the subscription string exactly as the
 //!   client sent it (a topic filter, or a `$share/group/filter`), so it is
 //!   re-parsed on load the same way the live path parses it.
+//! - `inflight` — key = `client_id`, value = an opaque blob produced by the hub
+//!   (its outbound QoS 1/2 in-flight queue plus its packet-id counter). The
+//!   storage layer stores and returns the bytes verbatim; only the hub knows the
+//!   encoding. Restored on reconnect so unacknowledged messages survive a
+//!   broker restart.
 //!
 //! Writes are durable (each is its own committed transaction); the store is
-//! loaded back into memory at startup. In-flight QoS 1/2 queues are **not** yet
-//! persisted — they are lost on a broker restart.
+//! loaded back into memory at startup.
 //!
 //! [`RetainedStore`]: relay_core::RetainedStore
 
@@ -31,6 +35,7 @@ use relay_core::{Message, QoS};
 const RETAINED: TableDefinition<&str, &[u8]> = TableDefinition::new("retained");
 const SESSIONS: TableDefinition<&str, u32> = TableDefinition::new("sessions");
 const SUBSCRIPTIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("subscriptions");
+const INFLIGHT: TableDefinition<&str, &[u8]> = TableDefinition::new("inflight");
 
 /// Separator between `client_id` and the raw filter in a subscription key.
 const SEP: char = '\u{0}';
@@ -57,6 +62,7 @@ impl Storage {
         txn.open_table(RETAINED)?;
         txn.open_table(SESSIONS)?;
         txn.open_table(SUBSCRIPTIONS)?;
+        txn.open_table(INFLIGHT)?;
         txn.commit()?;
         Ok(Storage { db })
     }
@@ -130,6 +136,9 @@ impl Storage {
             for key in keys {
                 subs.remove(key.as_str())?;
             }
+
+            let mut inflight = txn.open_table(INFLIGHT)?;
+            inflight.remove(client_id)?;
         }
         txn.commit()?;
         Ok(())
@@ -158,6 +167,35 @@ impl Storage {
         }
         txn.commit()?;
         Ok(())
+    }
+
+    /// Persist a session's in-flight queue blob (opaque to storage). An empty
+    /// blob clears the row.
+    pub fn put_inflight(&self, client_id: &str, blob: &[u8]) -> Result<(), redb::Error> {
+        let txn = self.db.begin_write()?;
+        {
+            let mut table = txn.open_table(INFLIGHT)?;
+            if blob.is_empty() {
+                table.remove(client_id)?;
+            } else {
+                table.insert(client_id, blob)?;
+            }
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// Load every persisted in-flight blob, keyed by `client_id` (called at
+    /// startup). The bytes are returned verbatim for the hub to decode.
+    pub fn load_inflight(&self) -> Result<HashMap<String, Vec<u8>>, redb::Error> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(INFLIGHT)?;
+        let mut out = HashMap::new();
+        for row in table.iter()? {
+            let (key, value) = row?;
+            out.insert(key.value().to_string(), value.value().to_vec());
+        }
+        Ok(out)
     }
 
     /// Load every durable session with its subscriptions (called at startup).

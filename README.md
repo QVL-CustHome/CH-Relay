@@ -65,7 +65,7 @@ with `RELAY_CONFIG`.
 ### V2 — the extras (in progress)
 - [x] On-disk persistence — **retained messages** survive restart (`redb` embedded store, opt-in via `data_dir`, verified end-to-end)
 - [x] On-disk persistence — **durable sessions**: a `clean_start=false` client's identity + subscriptions survive a restart (`session_present` after reload, verified end-to-end)
-- [ ] On-disk persistence — in-flight QoS 1/2 queues (lost on restart for now)
+- [x] On-disk persistence — **in-flight QoS 1/2 queues**: unacknowledged outbound messages (including those queued while a durable client is offline) survive a restart and are retransmitted on reconnect (verified end-to-end)
 - [ ] Dead-letter queue + retry with backoff
 - [ ] Replay / event-sourcing from an offset
 - [ ] HTTP admin API + monitoring dashboard
