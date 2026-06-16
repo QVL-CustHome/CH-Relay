@@ -43,6 +43,13 @@ cargo run -p relay-server
 Configuration is read from `config.toml` (see `config.toml.example`), overridable
 with `RELAY_CONFIG`.
 
+## Using the bus
+
+See **[docs/USAGE.md](docs/USAGE.md)** for the full integration guide: endpoints,
+connecting from each language, MQTT concepts as Relay applies them, the reserved
+namespaces (`$share/`, `$dlq/`, `$replay/`), configuration, the dashboard, common
+patterns, and a compact **cheat sheet for AI agents** wiring a service onto the bus.
+
 ## Roadmap
 
 ### V1 — core broker ✅ complete
