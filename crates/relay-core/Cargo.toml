@@ -1,0 +1,11 @@
+[package]
+name = "relay-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Core broker engine for Relay (MQTT 5.0) — transport-agnostic, no I/O."
+
+[dependencies]
+thiserror.workspace = true
+bytes.workspace = true

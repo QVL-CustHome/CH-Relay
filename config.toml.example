@@ -1,0 +1,8 @@
+# Relay configuration — copy to `config.toml` and adjust.
+# Path can be overridden with the RELAY_CONFIG environment variable.
+
+# TCP listener for native MQTT clients (Rust, Go, Java backends).
+tcp_addr = "0.0.0.0:1883"
+
+# WebSocket listener for browser / mobile clients (MQTT-over-WebSocket).
+ws_addr = "0.0.0.0:8083"
