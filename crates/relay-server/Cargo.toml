@@ -23,6 +23,7 @@ rmqtt-codec.workspace = true    # MQTT v5 codec (tokio-util 0.7 / bytes 1.x) fro
 tokio-util.workspace = true     # Framed (codec <-> stream/sink)
 futures.workspace = true        # StreamExt / SinkExt over Framed
 tokio-tungstenite.workspace = true  # MQTT-over-WebSocket (HTTP -> WS upgrade)
+redb.workspace = true               # on-disk store for retained messages (V2)
 
 [dev-dependencies]
 # WebSocket *client* for the e2e test (adds the `connect` feature; only pulled

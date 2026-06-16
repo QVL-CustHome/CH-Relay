@@ -29,7 +29,9 @@ use rmqtt_codec::v5::{
     Packet, PublishAck2, PublishAck2Reason, PublishProperties, QoS as WireQoS,
 };
 use tokio::sync::mpsc;
-use tracing::debug;
+use tracing::{debug, warn};
+
+use crate::storage::Storage;
 
 /// "Never expire" sentinel for the session-expiry interval (MQTT 5).
 const NO_EXPIRY: u32 = u32::MAX;
@@ -222,16 +224,34 @@ struct Inner {
     router: Mutex<Router>,
     retained: Mutex<RetainedStore>,
     sessions: Mutex<SessionTable>,
+    storage: Option<Storage>,
 }
 
 impl Hub {
-    pub fn new() -> Self {
+    /// Build the broker state. With a [`Storage`], retained messages are loaded
+    /// from disk at startup and persisted on change; without one, Relay is fully
+    /// in-memory.
+    pub fn new(storage: Option<Storage>) -> Self {
+        let mut retained = RetainedStore::new();
+        if let Some(s) = &storage {
+            match s.load_retained() {
+                Ok(messages) => {
+                    let n = messages.len();
+                    for msg in messages {
+                        retained.apply(msg);
+                    }
+                    debug!(retained = n, "loaded retained messages from disk");
+                }
+                Err(e) => warn!(error = %e, "failed to load retained messages from disk"),
+            }
+        }
         Hub {
             inner: Arc::new(Inner {
                 next_id: AtomicU64::new(1),
                 router: Mutex::new(Router::new()),
-                retained: Mutex::new(RetainedStore::new()),
+                retained: Mutex::new(retained),
                 sessions: Mutex::new(SessionTable::default()),
+                storage,
             }),
         }
     }
@@ -364,6 +384,12 @@ impl Hub {
                 qos: msg_qos,
                 retain: true,
             });
+            // Persist (or clear) the retained message so it survives a restart.
+            if let Some(storage) = &self.inner.storage {
+                if let Err(e) = storage.put_retained(topic, payload, msg_qos) {
+                    warn!(%topic, error = %e, "failed to persist retained message");
+                }
+            }
         }
 
         // Resolve targets, releasing the router lock before touching sessions.
@@ -423,6 +449,6 @@ impl Hub {
 
 impl Default for Hub {
     fn default() -> Self {
-        Self::new()
+        Self::new(None)
     }
 }

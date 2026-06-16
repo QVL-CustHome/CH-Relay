@@ -26,3 +26,5 @@ toml = "0.8"
 # MQTT-over-WebSocket transport: server-side HTTP->WS upgrade. No TLS here
 # (terminate TLS at a reverse proxy, or add rustls later as a V2 item).
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
+# On-disk store (V2 persistence): pure-Rust embedded KV, single file, no native deps.
+redb = "4"

@@ -6,3 +6,9 @@ tcp_addr = "0.0.0.0:1883"
 
 # WebSocket listener for browser / mobile clients (MQTT-over-WebSocket).
 ws_addr = "0.0.0.0:8083"
+
+# On-disk store directory. When set, retained messages survive restarts
+# (an embedded `redb` file is created inside). Leave unset for in-memory only.
+# Use a TOML literal string (single quotes) for Windows paths.
+# data_dir = 'C:\relay-data'
+# data_dir = "/var/lib/relay"

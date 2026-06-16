@@ -61,8 +61,9 @@ with `RELAY_CONFIG`.
 > `mqttbytes` 0.6 was rejected — its v5 CONNACK encoding omits the mandatory property-length byte;
 > `mqtt-v5` 0.1 was rejected — it pins the obsolete tokio 0.2 / bytes 0.5 ecosystem.
 
-### V1.5 / V2 — the extras
-- [ ] On-disk persistence (WAL / embedded store)
+### V2 — the extras (in progress)
+- [x] On-disk persistence — **retained messages** survive restart (`redb` embedded store, opt-in via `data_dir`, verified end-to-end)
+- [ ] On-disk persistence — sessions + in-flight QoS 1/2 queues
 - [ ] Dead-letter queue + retry with backoff
 - [ ] Replay / event-sourcing from an offset
 - [ ] HTTP admin API + monitoring dashboard

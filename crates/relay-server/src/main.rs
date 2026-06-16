@@ -8,10 +8,12 @@
 mod config;
 mod connection;
 mod hub;
+mod storage;
 mod ws;
 
 use config::Config;
 use hub::Hub;
+use storage::Storage;
 use tokio::net::TcpListener;
 use tracing::{info, warn};
 
@@ -30,6 +32,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!(tcp = %config.tcp_addr, ws = %config.ws_addr, "Relay starting");
 
+    // Open the on-disk store if a data directory is configured; otherwise run
+    // fully in-memory (V1 behaviour).
+    let storage = match &config.data_dir {
+        Some(dir) => {
+            std::fs::create_dir_all(dir)?;
+            let path = dir.join("relay.redb");
+            info!(path = %path.display(), "persistence enabled");
+            Some(Storage::open(&path)?)
+        }
+        None => {
+            info!("persistence disabled (in-memory); set `data_dir` to enable");
+            None
+        }
+    };
+
     let tcp = TcpListener::bind(config.tcp_addr).await?;
     info!("relay listening on tcp://{}", config.tcp_addr);
 
@@ -38,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ws_listener = TcpListener::bind(config.ws_addr).await?;
     info!("relay listening on ws://{}", config.ws_addr);
 
-    let hub = Hub::new();
+    let hub = Hub::new(storage);
 
     loop {
         tokio::select! {

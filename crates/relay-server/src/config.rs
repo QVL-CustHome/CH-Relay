@@ -3,7 +3,7 @@
 
 use serde::Deserialize;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Top-level Relay configuration.
 #[derive(Debug, Clone, Deserialize)]
@@ -13,6 +13,9 @@ pub struct Config {
     pub tcp_addr: SocketAddr,
     /// WebSocket listener for browser / mobile clients (MQTT-over-WebSocket).
     pub ws_addr: SocketAddr,
+    /// Directory for the on-disk store. When set, retained messages survive
+    /// restarts; when absent, Relay runs fully in-memory (V1 behaviour).
+    pub data_dir: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -21,6 +24,7 @@ impl Default for Config {
             // 1883 is the IANA-registered MQTT port; 8083 is the de-facto MQTT-over-WS port.
             tcp_addr: "0.0.0.0:1883".parse().unwrap(),
             ws_addr: "0.0.0.0:8083".parse().unwrap(),
+            data_dir: None,
         }
     }
 }
