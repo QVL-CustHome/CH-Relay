@@ -12,12 +12,14 @@
 //! - [`retained`] — last-value-per-topic store, replayed to new subscribers.
 //! - `session`    — per-client session state and QoS in-flight tracking *(TODO V1)*.
 
+pub mod acl;
 pub mod message;
 pub mod qos;
 pub mod retained;
 pub mod router;
 pub mod topic;
 
+pub use acl::{filter_subsumes, Acl};
 pub use message::Message;
 pub use qos::QoS;
 pub use retained::RetainedStore;

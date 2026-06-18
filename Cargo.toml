@@ -34,3 +34,7 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 rustls-pemfile = "2"
 # Self-signed cert generation, tests only.
 rcgen = "0.13"
+# Optional JWT authentication (HS256). default-features off → HMAC only via `ring`
+# (already in the tree through rustls), no PEM/RSA deps pulled in.
+jsonwebtoken = { version = "9", default-features = false }
+serde_json = "1"

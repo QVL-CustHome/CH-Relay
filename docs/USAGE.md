@@ -25,9 +25,11 @@ then come back here for detail.
   MQTT-over-WebSocket port.
 - The WebSocket listener accepts the upgrade on any path (e.g. `ws://host:8083` or
   `ws://host:8083/mqtt`) and answers the `mqtt` subprotocol.
-- **Authentication is not enforced yet.** The broker accepts any client. Do not
-  expose it to untrusted networks without a TLS terminator + network controls.
-  (`username`/`password` may be sent but are currently ignored.)
+- **Authentication is optional (opt-in).** With no `[auth]` section the broker
+  accepts any client (legacy). With `[auth]` configured, every CONNECT must carry
+  a valid **JWT as the MQTT password** and is then restricted by a per-role topic
+  **ACL** — see [§11 Authentication & ACL](#11-authentication--acl). Either way,
+  for `wss://` terminate TLS at a proxy or use the native `mqtts` listener.
 
 ---
 
@@ -345,8 +347,9 @@ service):
 
 ## 10. Limits & current scope
 
-- **No authentication / ACL yet** — the broker accepts any client; secure the
-  network and use TLS.
+- **Authentication is opt-in** — without `[auth]` the broker accepts any client;
+  with it, a valid JWT is required and a topic ACL applies (see §11). Still secure
+  the network and use TLS for transport encryption.
 - **WebSocket is plain (`ws://`)** — terminate TLS at a reverse proxy for `wss://`
   (native TLS is available on the TCP listener via `mqtts`).
 - **Inbound QoS 2 dedup state is not persisted** — an in-progress *inbound* QoS 2
@@ -355,6 +358,72 @@ service):
 - **No replay API for dead letters** yet — they are persisted but not yet
   exposed for programmatic re-injection.
 - Replay filters travel in the PUBLISH topic (wildcard caveat in §6).
+
+---
+
+## 11. Authentication & ACL
+
+Auth is **opt-in and generic**. With no `[auth]` block the broker is open. With
+one, the broker enforces JWT auth + a topic ACL — configurable, not tied to any
+project.
+
+### Connecting with a token
+
+Send the **JWT as the MQTT password** (the username is ignored). The broker
+verifies it (HS256, shared `jwt_secret`) and checks expiry.
+
+```ts
+import mqtt from "mqtt";
+const client = mqtt.connect("mqtt://127.0.0.1:1883", {
+  protocolVersion: 5,
+  clientId: "billing-service",
+  password: MY_JWT,            // <-- the token goes here
+  // username: optional, ignored by the broker
+});
+```
+
+A missing, malformed, wrong-signature or expired token gets a CONNACK with
+reason **Not authorized (0x87)** and the connection is closed.
+
+### How the ACL is built
+
+The broker reads two claims (names configurable): the **identity** (`sub` by
+default) and the **roles** (`roles`, a JSON array). It then unions every ACL rule
+whose `role` matches one of the client's roles (`role = "*"` matches everyone),
+substituting `{claim}` placeholders from the token:
+
+```toml
+[auth]
+jwt_secret     = "…shared secret…"
+identity_claim = "sub"      # default
+roles_claim    = "roles"    # default
+
+# Each user: only their own subtree.
+[[auth.acl]]
+role      = "*"
+publish   = ["drive/{sub}/#"]
+subscribe = ["drive/{sub}/#"]
+
+# Admins: the whole tree + dead letters.
+[[auth.acl]]
+role      = "drive_admin"
+publish   = ["drive/#"]
+subscribe = ["drive/#", "$dlq/#"]
+```
+
+Rules:
+- **Publish** to `T` is allowed if some `publish` pattern matches `T`.
+- **Subscribe** with filter `F` is allowed only if some `subscribe` pattern
+  *subsumes* `F` — every topic `F` could match must also be covered by the
+  pattern. So a client granted `drive/{sub}/#` **cannot** subscribe to `drive/#`.
+- **Shared** subscriptions (`$share/g/F`) are checked on the inner `F`.
+- A **`$replay/{from}/{filter}`** request is checked against the *subscribe* ACL
+  for `{filter}` (replay is a read).
+- A pattern that references a claim the token doesn't have grants nothing
+  (fail closed).
+
+A denied subscribe returns SUBACK **Not authorized** for that filter; a denied
+publish returns PUBACK/PUBREC **Not authorized** (QoS 1/2) or is dropped (QoS 0).
 
 ---
 
@@ -369,7 +438,10 @@ service):
 - Always set `protocolVersion = 5`.
 - Durable consumer: stable `clientId`, `clean=false`, `sessionExpiryInterval>0`.
   Ephemeral publisher: `clean=true` (empty clientId is acceptable).
-- No credentials required (auth not enforced).
+- Auth: if the broker has `[auth]`, send your **JWT as the MQTT password**
+  (username ignored); else no credentials are required. A bad/expired token →
+  CONNACK Not authorized. Your topic ACL is derived from the token's roles +
+  claims (e.g. you may be limited to `drive/{sub}/#`); see §11.
 
 **Publish / subscribe**
 - Publish to a concrete topic `a/b/c` (no wildcards). Subscribe with filters using

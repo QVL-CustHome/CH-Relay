@@ -39,3 +39,35 @@ event_log_max = 100000
 # Set an address to enable it: `/` serves a live HTML page, `/stats` returns
 # JSON (clients, subscriptions, retained, dead-letters, event-log offset).
 # http_addr = "127.0.0.1:8080"
+
+# Authentication + topic ACL (optional, opt-in). Omit the whole [auth] section
+# to keep the broker open (legacy behaviour). When present, every CONNECT must
+# carry a valid JWT, sent as the MQTT *password* (username is ignored).
+#
+# [auth]
+# # HS256 shared secret used to verify the JWT signature.
+# jwt_secret = "change-me-shared-secret-min-32-bytes"
+# # Claim used as the principal identity (and as {sub} in ACL templates).
+# identity_claim = "sub"
+# # Claim holding the principal's roles (a JSON array of strings).
+# roles_claim = "roles"
+#
+# # ACL rules. A client receives the union of every rule whose `role` matches
+# # one of its token roles (`role = "*"` matches any authenticated client).
+# # Patterns may use `{claim}` placeholders, substituted from the token — e.g.
+# # `{sub}` becomes the identity. A pattern referencing a missing claim grants
+# # nothing (fail closed). Publish is checked against the concrete topic;
+# # subscribe requires the requested filter to be *subsumed* by an allowed
+# # pattern (a client can't widen its reach with `#`).
+#
+# # Every authenticated user: only their own Drive subtree.
+# [[auth.acl]]
+# role = "*"
+# publish   = ["drive/{sub}/#"]
+# subscribe = ["drive/{sub}/#"]
+#
+# # Admins: the whole Drive tree + the dead-letter stream.
+# [[auth.acl]]
+# role = "drive_admin"
+# publish   = ["drive/#"]
+# subscribe = ["drive/#", "$dlq/#"]

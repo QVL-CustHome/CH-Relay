@@ -5,6 +5,7 @@
 //! - **ws://**  — MQTT-over-WebSocket for browsers and mobile (HTTP upgrade,
 //!   `mqtt` subprotocol), bridged to bytes by [`ws::WsByteStream`].
 
+mod auth;
 mod config;
 mod connection;
 mod dashboard;
@@ -15,6 +16,7 @@ mod ws;
 
 use config::Config;
 use hub::{Hub, RetryConfig};
+use std::sync::Arc;
 use std::time::Duration;
 use storage::Storage;
 use tokio::net::TcpListener;
@@ -65,6 +67,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let hub = Hub::new(storage, retry, config.event_log_max);
 
+    // Optional JWT auth + ACL. Shared (Arc) across every connection; `None` keeps
+    // the broker open (legacy behaviour).
+    let auth = config.auth.clone().map(Arc::new);
+    match &auth {
+        Some(_) => info!("authentication ENABLED (JWT required at CONNECT)"),
+        None => info!("authentication disabled (open broker; set [auth] to enable)"),
+    }
+
     // Optional secure MQTT (mqtts) listener: enabled when a cert + key are set.
     // Runs the same broker loop over a TLS-wrapped TcpStream.
     if let (Some(cert), Some(key)) = (&config.tls_cert, &config.tls_key) {
@@ -73,6 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let tls_listener = TcpListener::bind(tls_addr).await?;
         info!("relay listening on mqtts://{tls_addr} (TLS)");
         let hub = hub.clone();
+        let auth = auth.clone();
         tokio::spawn(async move {
             loop {
                 match tls_listener.accept().await {
@@ -80,10 +91,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         info!(%peer, "accepted TLS connection");
                         let acceptor = acceptor.clone();
                         let hub = hub.clone();
+                        let auth = auth.clone();
                         tokio::spawn(async move {
                             match acceptor.accept(socket).await {
                                 Ok(stream) => {
-                                    connection::handle(stream, format!("tls://{peer}"), hub).await;
+                                    connection::handle(stream, format!("tls://{peer}"), hub, auth).await;
                                 }
                                 Err(e) => warn!(%peer, error = %e, "TLS handshake failed"),
                             }
@@ -113,7 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match res {
                     Ok((socket, peer)) => {
                         info!(%peer, "accepted TCP connection");
-                        tokio::spawn(connection::handle(socket, peer.to_string(), hub.clone()));
+                        tokio::spawn(connection::handle(socket, peer.to_string(), hub.clone(), auth.clone()));
                     }
                     Err(e) => warn!(error = %e, "TCP accept failed"),
                 }
@@ -123,11 +135,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok((socket, peer)) => {
                         info!(%peer, "accepted WebSocket connection");
                         let hub = hub.clone();
+                        let auth = auth.clone();
                         tokio::spawn(async move {
                             match tokio_tungstenite::accept_hdr_async(socket, ws::upgrade_callback).await {
                                 Ok(stream) => {
                                     let io = ws::WsByteStream::new(stream);
-                                    connection::handle(io, format!("ws://{peer}"), hub).await;
+                                    connection::handle(io, format!("ws://{peer}"), hub, auth).await;
                                 }
                                 Err(e) => warn!(%peer, error = %e, "WebSocket handshake failed"),
                             }

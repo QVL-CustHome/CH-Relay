@@ -27,6 +27,8 @@ redb.workspace = true               # on-disk store for retained messages (V2)
 rustls.workspace = true             # TLS (mqtts)
 tokio-rustls.workspace = true       # rustls <-> tokio streams
 rustls-pemfile.workspace = true     # load PEM cert/key files
+jsonwebtoken.workspace = true       # optional JWT auth at CONNECT (HS256)
+serde_json.workspace = true         # generic JWT claims + ACL templating
 
 [dev-dependencies]
 # WebSocket *client* for the e2e test (adds the `connect` feature; only pulled
@@ -35,3 +37,6 @@ tokio-tungstenite = { version = "0.29", default-features = false, features = ["h
 # TLS *client* + self-signed cert generation for the mqtts e2e test.
 tokio-rustls.workspace = true
 rcgen.workspace = true
+# JWT minting for the auth e2e test (integration tests don't see normal deps).
+jsonwebtoken.workspace = true
+serde_json.workspace = true

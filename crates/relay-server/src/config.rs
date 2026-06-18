@@ -5,6 +5,8 @@ use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
+use crate::auth::AuthConfig;
+
 /// Top-level Relay configuration.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -37,6 +39,8 @@ pub struct Config {
     pub tls_key: Option<PathBuf>,
     /// Address of the embedded HTTP monitoring dashboard. Unset = disabled.
     pub http_addr: Option<SocketAddr>,
+    /// Optional JWT authentication + topic ACL. Unset = open broker (legacy).
+    pub auth: Option<AuthConfig>,
 }
 
 impl Default for Config {
@@ -54,6 +58,7 @@ impl Default for Config {
             tls_cert: None,
             tls_key: None,
             http_addr: None,
+            auth: None,
         }
     }
 }

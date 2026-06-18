@@ -21,9 +21,10 @@
 //! [`Hub`]: crate::hub::Hub
 
 use std::num::NonZeroU16;
+use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
-use relay_core::{ClientId, Message, QoS, SharedSubscription, TopicFilter};
+use relay_core::{Acl, ClientId, Message, QoS, SharedSubscription, TopicFilter};
 use rmqtt_codec::v5::{
     Codec, ConnectAck, ConnectAckReason, DisconnectReasonCode, Packet, PublishAck, PublishAck2,
     PublishAck2Reason, PublishAckReason, SubscribeAck, SubscribeAckReason, UnsubscribeAck,
@@ -34,7 +35,32 @@ use tokio::sync::mpsc;
 use tokio_util::codec::Framed;
 use tracing::{debug, info, warn};
 
+use crate::auth::AuthConfig;
 use crate::hub::{self, Hub};
+
+/// A connection's authorization context, established at CONNECT.
+enum Access {
+    /// Auth disabled — every topic is permitted (legacy open broker).
+    Open,
+    /// Authenticated client, limited to its templated topic ACL.
+    Authed(Acl),
+}
+
+impl Access {
+    fn can_publish(&self, topic: &str) -> bool {
+        match self {
+            Access::Open => true,
+            Access::Authed(acl) => acl.can_publish(topic),
+        }
+    }
+
+    fn can_subscribe(&self, filter: &str) -> bool {
+        match self {
+            Access::Open => true,
+            Access::Authed(acl) => acl.can_subscribe(filter),
+        }
+    }
+}
 
 /// Maximum inbound packet size we accept (256 KiB); 0 outbound = unlimited.
 const MAX_INBOUND_SIZE: u32 = 256 * 1024;
@@ -89,7 +115,7 @@ async fn next_outbound(rx: &mut Option<mpsc::UnboundedReceiver<Packet>>) -> Opti
 }
 
 /// Drive a single client connection until it disconnects or errors.
-pub async fn handle<S>(io: S, peer: String, hub: Hub)
+pub async fn handle<S>(io: S, peer: String, hub: Hub, auth: Option<Arc<AuthConfig>>)
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -98,6 +124,8 @@ where
     let mut session_id: Option<ClientId> = None;
     let mut generation: u64 = 0;
     let mut rx: Option<mpsc::UnboundedReceiver<Packet>> = None;
+    // Authorization context, set on a successful CONNECT.
+    let mut access = Access::Open;
     // The client's Will, published if the connection ends without a clean DISCONNECT.
     let mut will: Option<Message> = None;
     let mut clean_disconnect = false;
@@ -123,6 +151,28 @@ where
                             (provided, connect.clean_start)
                         };
                         info!(%peer, %client_id, clean_start, "CONNECT");
+
+                        // Authenticate before creating any session state. The JWT
+                        // is carried as the MQTT password; with no [auth] config the
+                        // broker stays open.
+                        if let Some(cfg) = &auth {
+                            match cfg.authenticate(connect.password.as_deref()) {
+                                Ok(principal) => {
+                                    info!(%peer, %client_id, identity = %principal.identity, "authenticated");
+                                    access = Access::Authed(principal.acl);
+                                }
+                                Err(e) => {
+                                    warn!(%peer, %client_id, ?e, "authentication failed, rejecting CONNECT");
+                                    let ack = ConnectAck {
+                                        session_present: false,
+                                        reason_code: ConnectAckReason::NotAuthorized,
+                                        ..ConnectAck::default()
+                                    };
+                                    let _ = sink.send(Packet::from(ack)).await;
+                                    break;
+                                }
+                            }
+                        }
 
                         let conn = hub.connect(&client_id, clean_start, connect.session_expiry_interval_secs);
                         session_id = Some(conn.id);
@@ -151,6 +201,15 @@ where
                         let mut retained_jobs: Vec<(TopicFilter, QoS)> = Vec::new();
                         for (filter, opts) in &sub.topic_filters {
                             let granted = hub::to_core_qos(opts.qos).min(MAX_QOS);
+                            // ACL: a shared subscription is checked on its inner filter.
+                            let effective = SharedSubscription::parse(filter)
+                                .map(|s| s.filter.as_str().to_string())
+                                .unwrap_or_else(|| filter.to_string());
+                            if !access.can_subscribe(&effective) {
+                                warn!(%peer, %filter, "SUBSCRIBE denied by ACL");
+                                status.push(SubscribeAckReason::NotAuthorized);
+                                continue;
+                            }
                             if let Some(shared) = SharedSubscription::parse(filter) {
                                 info!(%peer, group = %shared.group, filter = %shared.filter.as_str(), ?granted, "SUBSCRIBE (shared)");
                                 hub.subscribe_shared(shared.group, id, shared.filter, granted, filter);
@@ -190,8 +249,14 @@ where
                         if let Some(rest) = topic.strip_prefix("$replay/") {
                             match parse_replay(rest) {
                                 Some((from, filter)) => {
-                                    let n = hub.replay(id, from, &filter);
-                                    info!(%peer, from, filter = %filter.as_str(), replayed = n, "REPLAY");
+                                    // Replay reads topics back to the client: gate it on
+                                    // the subscribe ACL for the requested filter.
+                                    if access.can_subscribe(filter.as_str()) {
+                                        let n = hub.replay(id, from, &filter);
+                                        info!(%peer, from, filter = %filter.as_str(), replayed = n, "REPLAY");
+                                    } else {
+                                        warn!(%peer, filter = %filter.as_str(), "REPLAY denied by ACL");
+                                    }
                                 }
                                 None => warn!(%peer, %topic, "invalid $replay request"),
                             }
@@ -208,6 +273,29 @@ where
                                 }
                                 (QoS::ExactlyOnce, Some(packet_id)) => {
                                     if sink.send(pubrec(packet_id)).await.is_err() { break; }
+                                }
+                                _ => {}
+                            }
+                        } else if !access.can_publish(&topic) {
+                            warn!(%peer, %topic, "PUBLISH denied by ACL");
+                            match (msg_qos, p.packet_id) {
+                                (QoS::AtLeastOnce, Some(packet_id)) => {
+                                    let ack = PublishAck {
+                                        packet_id,
+                                        reason_code: PublishAckReason::NotAuthorized,
+                                        properties: Vec::new(),
+                                        reason_string: None,
+                                    };
+                                    if sink.send(Packet::PublishAck(ack)).await.is_err() { break; }
+                                }
+                                (QoS::ExactlyOnce, Some(packet_id)) => {
+                                    let rec = PublishAck {
+                                        packet_id,
+                                        reason_code: PublishAckReason::NotAuthorized,
+                                        properties: Vec::new(),
+                                        reason_string: None,
+                                    };
+                                    if sink.send(Packet::PublishReceived(rec)).await.is_err() { break; }
                                 }
                                 _ => {}
                             }

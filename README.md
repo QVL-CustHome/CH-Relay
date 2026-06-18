@@ -79,6 +79,10 @@ patterns, and a compact **cheat sheet for AI agents** wiring a service onto the 
 - [x] **TLS (mqtts)** — optional secure listener (rustls/`ring`), enabled by pointing `tls_cert` + `tls_key` at PEM files; same broker loop over the TLS stream (verified end-to-end against a self-signed cert)
 - [x] **Embedded monitoring dashboard** — a built-in HTTP endpoint (`http_addr`, no separate service): `/` serves a live page, `/stats` a JSON snapshot (clients, subscriptions, retained, dead-letters, event-log size/offset) (verified end-to-end)
 
+### V3 — security ✅ auth + ACL
+- [x] **JWT authentication (opt-in)** — with an `[auth]` block, every CONNECT must carry a valid HS256 JWT (sent as the MQTT password); the secret and the identity/roles claims are configurable, so it is not tied to any one project. No `[auth]` ⇒ open broker (legacy). (verified end-to-end)
+- [x] **Topic ACL** — per-role publish/subscribe allow-lists, templated with the token's claims (e.g. `drive/{sub}/#`). Publish is matched against the concrete topic; subscribe must be *subsumed* by an allowed pattern (no widening with `#`). Shared subscriptions are checked on their inner filter; `$replay` on the subscribe ACL. (verified end-to-end)
+
 ## Feature mapping (what MQTT 5 gives us out of the box)
 
 | Need | MQTT 5.0 mechanism |
