@@ -31,7 +31,7 @@ use rmqtt_codec::v5::{
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use crate::storage::Storage;
+use crate::storage::{spawn_persist_worker, PersistHandle, PersistOp, Storage};
 
 /// "Never expire" sentinel for the session-expiry interval (MQTT 5).
 const NO_EXPIRY: u32 = u32::MAX;
@@ -507,7 +507,11 @@ struct Inner {
     router: Mutex<Router>,
     retained: Mutex<RetainedStore>,
     sessions: Mutex<SessionTable>,
-    storage: Option<Storage>,
+    /// Read-only access to the on-disk store (startup loads + monitoring/replay).
+    /// All durable writes go through `persist` so no redb I/O runs on the runtime.
+    storage: Option<Arc<Storage>>,
+    /// Queues durable writes onto the dedicated persistence worker thread.
+    persist: Option<PersistHandle>,
     retry: RetryConfig,
     /// Event-log retention (max rows; 0 disables logging). Replay reads this log.
     event_log_max: u64,
@@ -519,6 +523,7 @@ impl Hub {
     /// in-memory. `retry` governs redelivery back-off and dead-lettering;
     /// `event_log_max` bounds the replayable event log (0 disables it).
     pub fn new(storage: Option<Storage>, retry: RetryConfig, event_log_max: u64) -> Self {
+        let storage = storage.map(Arc::new);
         let now = Instant::now();
         let mut retained = RetainedStore::new();
         let mut router = Router::new();
@@ -580,6 +585,8 @@ impl Hub {
             }
         }
 
+        let persist = storage.clone().map(spawn_persist_worker);
+
         let hub = Hub {
             inner: Arc::new(Inner {
                 next_id: AtomicU64::new(next_raw),
@@ -587,6 +594,7 @@ impl Hub {
                 retained: Mutex::new(retained),
                 sessions: Mutex::new(table),
                 storage,
+                persist,
                 retry,
                 event_log_max,
             }),
@@ -667,17 +675,29 @@ impl Hub {
         Connected { id, generation, rx, session_present: false }
     }
 
+    /// Queue a durable write onto the persistence worker. A no-op when running
+    /// in-memory. Never performs disk I/O on the caller's thread.
+    fn enqueue(&self, op: PersistOp) {
+        if let Some(persist) = &self.inner.persist {
+            persist.enqueue(op);
+        }
+    }
+
+    pub async fn flush(&self) {
+        if let Some(persist) = &self.inner.persist {
+            persist.flush().await;
+        }
+    }
+
     /// Persist (expiry > 0) or clear (expiry == 0) a session's durable marker.
     fn persist_meta(&self, client_id: &str, expiry_secs: u32) {
-        if let Some(storage) = &self.inner.storage {
-            let r = if expiry_secs > 0 {
-                storage.put_session(client_id, expiry_secs)
-            } else {
-                storage.remove_session(client_id)
-            };
-            if let Err(e) = r {
-                warn!(%client_id, error = %e, "failed to persist session");
-            }
+        if expiry_secs > 0 {
+            self.enqueue(PersistOp::PutSession {
+                client_id: client_id.to_string(),
+                expiry_secs,
+            });
+        } else {
+            self.enqueue(PersistOp::RemoveSession { client_id: client_id.to_string() });
         }
     }
 
@@ -692,27 +712,21 @@ impl Hub {
         }
     }
 
-    /// Write a previously-snapshotted in-flight blob to disk.
-    fn write_inflight(&self, client_id: &str, blob: &[u8]) {
-        if let Some(storage) = &self.inner.storage {
-            if let Err(e) = storage.put_inflight(client_id, blob) {
-                warn!(%client_id, error = %e, "failed to persist in-flight queue");
-            }
-        }
+    /// Queue a previously-snapshotted in-flight blob for writing.
+    fn write_inflight(&self, client_id: String, blob: Vec<u8>) {
+        self.enqueue(PersistOp::PutInflight { client_id, blob });
     }
 
     /// Forget a persisted session and its subscriptions (e.g. on clean start).
     fn forget_persisted(&self, client_id: &str) {
-        if let Some(storage) = &self.inner.storage {
-            if let Err(e) = storage.remove_session(client_id) {
-                warn!(%client_id, error = %e, "failed to forget persisted session");
-            }
-        }
+        self.enqueue(PersistOp::RemoveSession { client_id: client_id.to_string() });
     }
 
     /// Persist one subscription if the session is durable (expiry > 0).
     fn persist_subscription(&self, id: ClientId, raw: &str, qos: QoS) {
-        let Some(storage) = &self.inner.storage else { return };
+        if self.inner.persist.is_none() {
+            return;
+        }
         let client_id = {
             let table = self.inner.sessions.lock().unwrap();
             table
@@ -722,9 +736,11 @@ impl Hub {
                 .map(|s| s.client_id.clone())
         };
         if let Some(client_id) = client_id {
-            if let Err(e) = storage.put_subscription(&client_id, raw, qos) {
-                warn!(%client_id, error = %e, "failed to persist subscription");
-            }
+            self.enqueue(PersistOp::PutSubscription {
+                client_id,
+                raw: raw.to_string(),
+                qos,
+            });
         }
     }
 
@@ -805,7 +821,7 @@ impl Hub {
             }
         }
         for (client_id, blob) in to_persist {
-            self.write_inflight(&client_id, &blob);
+            self.write_inflight(client_id, blob);
         }
         for (client_id, msg) in dead {
             self.dead_letter(&client_id, &msg, "max_delivery_attempts_exceeded");
@@ -824,11 +840,9 @@ impl Hub {
         let qos = to_core_qos(msg.publish.qos);
         warn!(%client_id, topic = original_topic, attempts = msg.attempts, reason, "dead-lettering message");
 
-        if let Some(storage) = &self.inner.storage {
+        if self.inner.persist.is_some() {
             let blob = encode_dead_letter(client_id, original_topic, reason, msg.attempts, qos as u8, &msg.publish.payload);
-            if let Err(e) = storage.append_dead_letter(&blob) {
-                warn!(%client_id, error = %e, "failed to persist dead-lettered message");
-            }
+            self.enqueue(PersistOp::AppendDeadLetter { blob });
         }
 
         let dlq_topic = format!("$dlq/{client_id}/{original_topic}");
@@ -842,10 +856,8 @@ impl Hub {
         let client_id = table.by_id.remove(&id).map(|s| s.client_id);
         table.id_of.retain(|_, v| *v != id);
         self.inner.router.lock().unwrap().remove_client(id);
-        if let (Some(storage), Some(client_id)) = (&self.inner.storage, client_id) {
-            if let Err(e) = storage.remove_session(&client_id) {
-                warn!(%client_id, error = %e, "failed to remove persisted session");
-            }
+        if let Some(client_id) = client_id {
+            self.enqueue(PersistOp::RemoveSession { client_id });
         }
     }
 
@@ -879,7 +891,7 @@ impl Hub {
             }
         };
 
-        if let Some(storage) = &self.inner.storage {
+        if self.inner.persist.is_some() {
             let client_id = {
                 let table = self.inner.sessions.lock().unwrap();
                 table
@@ -889,9 +901,7 @@ impl Hub {
                     .map(|s| s.client_id.clone())
             };
             if let Some(client_id) = client_id {
-                if let Err(e) = storage.remove_subscription(&client_id, raw) {
-                    warn!(%client_id, error = %e, "failed to remove persisted subscription");
-                }
+                self.enqueue(PersistOp::RemoveSubscription { client_id, raw: raw.to_string() });
             }
         }
         removed
@@ -925,7 +935,7 @@ impl Hub {
             }
         };
         if let Some((client_id, blob)) = snapshot {
-            self.write_inflight(&client_id, &blob);
+            self.write_inflight(client_id, blob);
         }
     }
 
@@ -942,22 +952,18 @@ impl Hub {
                 retain: true,
             });
             // Persist (or clear) the retained message so it survives a restart.
-            if let Some(storage) = &self.inner.storage {
-                if let Err(e) = storage.put_retained(topic, payload, msg_qos) {
-                    warn!(%topic, error = %e, "failed to persist retained message");
-                }
-            }
+            self.enqueue(PersistOp::PutRetained {
+                topic: topic.to_string(),
+                payload: payload.clone(),
+                qos: msg_qos,
+            });
         }
 
         // Append to the replayable event log (application topics only; `$`
         // control/system topics such as `$dlq/...` are not journalled).
         if self.inner.event_log_max > 0 && !topic.starts_with('$') {
-            if let Some(storage) = &self.inner.storage {
-                let blob = encode_event(topic, msg_qos as u8, payload);
-                if let Err(e) = storage.append_event(&blob, self.inner.event_log_max) {
-                    warn!(%topic, error = %e, "failed to log event");
-                }
-            }
+            let blob = encode_event(topic, msg_qos as u8, payload);
+            self.enqueue(PersistOp::AppendEvent { blob, retention: self.inner.event_log_max });
         }
 
         // Resolve targets, releasing the router lock before touching sessions.
@@ -983,7 +989,7 @@ impl Hub {
             }
         }
         for (client_id, blob) in to_persist {
-            self.write_inflight(&client_id, &blob);
+            self.write_inflight(client_id, blob);
         }
         delivered
     }
@@ -1038,7 +1044,7 @@ impl Hub {
             })
         };
         if let Some((client_id, blob)) = snapshot {
-            self.write_inflight(&client_id, &blob);
+            self.write_inflight(client_id, blob);
         }
     }
 
@@ -1051,7 +1057,7 @@ impl Hub {
             })
         };
         if let Some((client_id, blob)) = snapshot {
-            self.write_inflight(&client_id, &blob);
+            self.write_inflight(client_id, blob);
         }
     }
 
@@ -1064,7 +1070,7 @@ impl Hub {
             })
         };
         if let Some((client_id, blob)) = snapshot {
-            self.write_inflight(&client_id, &blob);
+            self.write_inflight(client_id, blob);
         }
     }
 

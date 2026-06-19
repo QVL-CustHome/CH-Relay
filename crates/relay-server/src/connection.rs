@@ -252,6 +252,7 @@ where
                                     // Replay reads topics back to the client: gate it on
                                     // the subscribe ACL for the requested filter.
                                     if access.can_subscribe(filter.as_str()) {
+                                        hub.flush().await;
                                         let n = hub.replay(id, from, &filter);
                                         info!(%peer, from, filter = %filter.as_str(), replayed = n, "REPLAY");
                                     } else {
@@ -374,6 +375,7 @@ where
 
                     Packet::PingRequest => {
                         debug!(%peer, "PINGREQ");
+                        hub.flush().await;
                         if sink.send(Packet::PingResponse).await.is_err() { break; }
                     }
 
