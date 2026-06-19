@@ -32,10 +32,15 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::mpsc::{Receiver, Sender};
+use std::sync::Arc;
+use std::thread;
 
 use bytes::Bytes;
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use relay_core::{Message, QoS};
+use tokio::sync::oneshot;
+use tracing::warn;
 
 const RETAINED: TableDefinition<&str, &[u8]> = TableDefinition::new("retained");
 const SESSIONS: TableDefinition<&str, u32> = TableDefinition::new("sessions");
@@ -323,5 +328,109 @@ impl Storage {
             });
         }
         Ok(out)
+    }
+}
+
+/// A single durable write to apply against [`Storage`]. Queued by the hub and
+/// drained, in order, by the persistence worker thread.
+pub enum PersistOp {
+    PutSession { client_id: String, expiry_secs: u32 },
+    RemoveSession { client_id: String },
+    PutSubscription { client_id: String, raw: String, qos: QoS },
+    RemoveSubscription { client_id: String, raw: String },
+    PutInflight { client_id: String, blob: Vec<u8> },
+    PutRetained { topic: String, payload: Bytes, qos: QoS },
+    AppendDeadLetter { blob: Vec<u8> },
+    AppendEvent { blob: Vec<u8>, retention: u64 },
+    Flush { ack: oneshot::Sender<()> },
+}
+
+/// Hub-side handle to the persistence worker: enqueues [`PersistOp`]s without
+/// blocking the async runtime. Cloneable; the worker stops once every handle is
+/// dropped and the channel drains.
+#[derive(Clone)]
+pub struct PersistHandle {
+    tx: Sender<PersistOp>,
+}
+
+impl PersistHandle {
+    /// Queue a durable write. Never blocks on disk I/O. A send failure means the
+    /// worker thread is gone (shutdown); the op is dropped after a warning.
+    pub fn enqueue(&self, op: PersistOp) {
+        if self.tx.send(op).is_err() {
+            warn!("persistence worker is gone; dropping write");
+        }
+    }
+
+    pub async fn flush(&self) {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        if self.tx.send(PersistOp::Flush { ack: ack_tx }).is_err() {
+            warn!("persistence worker is gone; flush is a no-op");
+            return;
+        }
+        let _ = ack_rx.await;
+    }
+}
+
+/// Own a [`Storage`] on a dedicated OS thread and apply queued [`PersistOp`]s in
+/// FIFO order, keeping all redb I/O off the Tokio runtime while preserving write
+/// ordering (a single sequential writer). Returns the hub-side handle.
+pub fn spawn_persist_worker(storage: Arc<Storage>) -> PersistHandle {
+    let (tx, rx) = std::sync::mpsc::channel::<PersistOp>();
+    thread::Builder::new()
+        .name("relay-persist".into())
+        .spawn(move || run_persist_worker(storage, rx))
+        .expect("spawn persistence worker thread");
+    PersistHandle { tx }
+}
+
+fn run_persist_worker(storage: Arc<Storage>, rx: Receiver<PersistOp>) {
+    while let Ok(op) = rx.recv() {
+        apply_persist_op(&storage, op);
+    }
+}
+
+fn apply_persist_op(storage: &Storage, op: PersistOp) {
+    let name = persist_op_name(&op);
+    let result = match op {
+        PersistOp::Flush { ack } => {
+            let _ = ack.send(());
+            return;
+        }
+        PersistOp::PutSession { client_id, expiry_secs } => {
+            storage.put_session(&client_id, expiry_secs)
+        }
+        PersistOp::RemoveSession { client_id } => storage.remove_session(&client_id),
+        PersistOp::PutSubscription { client_id, raw, qos } => {
+            storage.put_subscription(&client_id, &raw, qos)
+        }
+        PersistOp::RemoveSubscription { client_id, raw } => {
+            storage.remove_subscription(&client_id, &raw)
+        }
+        PersistOp::PutInflight { client_id, blob } => storage.put_inflight(&client_id, &blob),
+        PersistOp::PutRetained { topic, payload, qos } => {
+            storage.put_retained(&topic, &payload, qos)
+        }
+        PersistOp::AppendDeadLetter { blob } => storage.append_dead_letter(&blob),
+        PersistOp::AppendEvent { blob, retention } => {
+            storage.append_event(&blob, retention).map(|_| ())
+        }
+    };
+    if let Err(e) = result {
+        warn!(op = name, error = %e, "persistence write failed");
+    }
+}
+
+fn persist_op_name(op: &PersistOp) -> &'static str {
+    match op {
+        PersistOp::PutSession { .. } => "put_session",
+        PersistOp::RemoveSession { .. } => "remove_session",
+        PersistOp::PutSubscription { .. } => "put_subscription",
+        PersistOp::RemoveSubscription { .. } => "remove_subscription",
+        PersistOp::PutInflight { .. } => "put_inflight",
+        PersistOp::PutRetained { .. } => "put_retained",
+        PersistOp::AppendDeadLetter { .. } => "append_dead_letter",
+        PersistOp::AppendEvent { .. } => "append_event",
+        PersistOp::Flush { .. } => "flush",
     }
 }
