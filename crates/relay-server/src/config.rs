@@ -28,6 +28,12 @@ pub struct Config {
     pub tls_key: Option<PathBuf>,
     #[serde(default)]
     pub http_addr: Option<SocketAddr>,
+    #[serde(default = "default_max_connections")]
+    pub max_connections: usize,
+    #[serde(default = "default_connect_timeout_ms")]
+    pub connect_timeout_ms: u64,
+    #[serde(default = "default_max_subscriptions_per_client")]
+    pub max_subscriptions_per_client: usize,
     pub auth: AuthConfig,
 }
 
@@ -48,6 +54,22 @@ fn default_retry_max_secs() -> u64 {
 }
 fn default_event_log_max() -> u64 {
     100_000
+}
+fn default_max_connections() -> usize {
+    env_or("RELAY_MAX_CONNECTIONS", 1000)
+}
+fn default_connect_timeout_ms() -> u64 {
+    env_or("RELAY_CONNECT_TIMEOUT_MS", 5000)
+}
+fn default_max_subscriptions_per_client() -> usize {
+    env_or("RELAY_MAX_SUBSCRIPTIONS_PER_CLIENT", 50)
+}
+
+fn env_or<T: std::str::FromStr>(key: &str, fallback: T) -> T {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(fallback)
 }
 
 impl Config {

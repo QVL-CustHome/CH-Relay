@@ -8,11 +8,13 @@ mod tls;
 mod ws;
 
 use config::Config;
+use connection::Limits;
 use hub::{Hub, RetryConfig};
 use std::sync::Arc;
 use std::time::Duration;
 use storage::Storage;
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
 #[tokio::main]
@@ -59,6 +61,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let auth = Arc::new(config.auth.clone());
     info!("authentication enabled (JWT required at CONNECT)");
 
+    let limits = Limits {
+        connect_timeout: Duration::from_millis(config.connect_timeout_ms),
+        max_subscriptions_per_client: config.max_subscriptions_per_client,
+    };
+    let connections = Arc::new(Semaphore::new(config.max_connections));
+    info!(
+        max_connections = config.max_connections,
+        connect_timeout_ms = config.connect_timeout_ms,
+        max_subscriptions_per_client = config.max_subscriptions_per_client,
+        "connection limits enabled"
+    );
+
     if let (Some(cert), Some(key)) = (&config.tls_cert, &config.tls_key) {
         let acceptor = tls::acceptor(cert, key)?;
         let tls_addr = config.tls_addr.unwrap_or_else(|| "0.0.0.0:8883".parse().unwrap());
@@ -66,10 +80,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("relay listening on mqtts://{tls_addr} (TLS)");
         let hub = hub.clone();
         let auth = auth.clone();
+        let connections = connections.clone();
         tokio::spawn(async move {
             loop {
                 match tls_listener.accept().await {
                     Ok((socket, peer)) => {
+                        let Ok(permit) = connections.clone().try_acquire_owned() else {
+                            warn!(%peer, "connection limit reached, refusing TLS connection");
+                            continue;
+                        };
                         info!(%peer, "accepted TLS connection");
                         let acceptor = acceptor.clone();
                         let hub = hub.clone();
@@ -77,7 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         tokio::spawn(async move {
                             match acceptor.accept(socket).await {
                                 Ok(stream) => {
-                                    connection::handle(stream, format!("tls://{peer}"), hub, auth).await;
+                                    connection::handle(stream, format!("tls://{peer}"), hub, auth, limits, permit).await;
                                 }
                                 Err(e) => warn!(%peer, error = %e, "TLS handshake failed"),
                             }
@@ -105,8 +124,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             res = tcp.accept() => {
                 match res {
                     Ok((socket, peer)) => {
+                        let Ok(permit) = connections.clone().try_acquire_owned() else {
+                            warn!(%peer, "connection limit reached, refusing TCP connection");
+                            continue;
+                        };
                         info!(%peer, "accepted TCP connection");
-                        tokio::spawn(connection::handle(socket, peer.to_string(), hub.clone(), auth.clone()));
+                        tokio::spawn(connection::handle(socket, peer.to_string(), hub.clone(), auth.clone(), limits, permit));
                     }
                     Err(e) => warn!(error = %e, "TCP accept failed"),
                 }
@@ -114,6 +137,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             res = ws_listener.accept() => {
                 match res {
                     Ok((socket, peer)) => {
+                        let Ok(permit) = connections.clone().try_acquire_owned() else {
+                            warn!(%peer, "connection limit reached, refusing WebSocket connection");
+                            continue;
+                        };
                         info!(%peer, "accepted WebSocket connection");
                         let hub = hub.clone();
                         let auth = auth.clone();
@@ -121,7 +148,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             match tokio_tungstenite::accept_hdr_async(socket, ws::upgrade_callback).await {
                                 Ok(stream) => {
                                     let io = ws::WsByteStream::new(stream);
-                                    connection::handle(io, format!("ws://{peer}"), hub, auth).await;
+                                    connection::handle(io, format!("ws://{peer}"), hub, auth, limits, permit).await;
                                 }
                                 Err(e) => warn!(%peer, error = %e, "WebSocket handshake failed"),
                             }

@@ -1,5 +1,7 @@
+use std::collections::HashSet;
 use std::num::NonZeroU16;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use relay_core::{Acl, ClientId, Message, QoS, SharedSubscription, TopicFilter};
@@ -9,7 +11,8 @@ use rmqtt_codec::v5::{
     UnsubscribeAckReason,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, OwnedSemaphorePermit};
+use tokio::time::timeout;
 use tokio_util::codec::Framed;
 use tracing::{debug, info, warn};
 
@@ -19,6 +22,12 @@ use crate::hub::{self, Hub};
 const MAX_INBOUND_SIZE: u32 = 256 * 1024;
 
 const MAX_QOS: QoS = QoS::ExactlyOnce;
+
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    pub connect_timeout: Duration,
+    pub max_subscriptions_per_client: usize,
+}
 
 fn granted_reason(q: QoS) -> SubscribeAckReason {
     match q {
@@ -60,11 +69,50 @@ async fn next_outbound(rx: &mut Option<mpsc::UnboundedReceiver<Packet>>) -> Opti
     }
 }
 
-pub async fn handle<S>(io: S, peer: String, hub: Hub, auth: Arc<AuthConfig>)
+enum Inbound {
+    Packet(Packet),
+    ProtocolError,
+    Closed,
+}
+
+async fn next_inbound<St, T, E>(buffered: &mut Option<Packet>, stream: &mut St) -> Inbound
 where
+    St: StreamExt<Item = Result<(Packet, T), E>> + Unpin,
+    E: std::fmt::Debug,
+{
+    if let Some(packet) = buffered.take() {
+        return Inbound::Packet(packet);
+    }
+    match stream.next().await {
+        Some(Ok((packet, _))) => Inbound::Packet(packet),
+        Some(Err(e)) => {
+            warn!(error = ?e, "decode error");
+            Inbound::ProtocolError
+        }
+        None => Inbound::Closed,
+    }
+}
+
+pub async fn handle<S>(
+    io: S,
+    peer: String,
+    hub: Hub,
+    auth: Arc<AuthConfig>,
+    limits: Limits,
+    permit: OwnedSemaphorePermit,
+) where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let _permit = permit;
     let (mut sink, mut stream) = Framed::new(io, Codec::new(MAX_INBOUND_SIZE, 0)).split();
+
+    let mut buffered: Option<Packet> = None;
+    let first = match timeout(limits.connect_timeout, next_inbound(&mut buffered, &mut stream)).await {
+        Ok(Inbound::Packet(p)) => p,
+        Ok(Inbound::ProtocolError) => { debug!(%peer, "protocol error before CONNECT, dropping"); return; }
+        Ok(Inbound::Closed) => { info!(%peer, "client closed connection before CONNECT"); return; }
+        Err(_) => { warn!(%peer, "no CONNECT before timeout, dropping"); return; }
+    };
 
     let mut session_id: Option<ClientId> = None;
     let mut generation: u64 = 0;
@@ -72,14 +120,17 @@ where
     let mut access = Acl::default();
     let mut will: Option<Message> = None;
     let mut clean_disconnect = false;
+    let mut active_filters: HashSet<String> = HashSet::new();
+
+    buffered = Some(first);
 
     loop {
         tokio::select! {
-            incoming = stream.next() => {
+            incoming = next_inbound(&mut buffered, &mut stream) => {
                 let packet = match incoming {
-                    Some(Ok((p, _))) => p,
-                    Some(Err(e)) => { warn!(%peer, error = ?e, "protocol error, dropping"); break; }
-                    None => { info!(%peer, "client closed connection"); break; }
+                    Inbound::Packet(p) => p,
+                    Inbound::ProtocolError => { debug!(%peer, "protocol error, dropping"); break; }
+                    Inbound::Closed => { info!(%peer, "client closed connection"); break; }
                 };
 
                 match packet {
@@ -99,6 +150,20 @@ where
                             }
                             Err(e) => {
                                 warn!(%peer, %client_id, ?e, "authentication failed, rejecting CONNECT");
+                                let ack = ConnectAck {
+                                    session_present: false,
+                                    reason_code: ConnectAckReason::NotAuthorized,
+                                    ..ConnectAck::default()
+                                };
+                                let _ = sink.send(Packet::from(ack)).await;
+                                break;
+                            }
+                        }
+
+                        if let Some(w) = connect.last_will.as_ref() {
+                            let will_topic = w.topic.to_string();
+                            if !access.can_publish(&will_topic) {
+                                warn!(%peer, %client_id, topic = %will_topic, "Will denied by ACL, rejecting CONNECT");
                                 let ack = ConnectAck {
                                     session_present: false,
                                     reason_code: ConnectAckReason::NotAuthorized,
@@ -143,13 +208,22 @@ where
                                 status.push(SubscribeAckReason::NotAuthorized);
                                 continue;
                             }
+                            let key = filter.to_string();
+                            let is_new = !active_filters.contains(&key);
+                            if is_new && active_filters.len() >= limits.max_subscriptions_per_client {
+                                warn!(%peer, %filter, limit = limits.max_subscriptions_per_client, "SUBSCRIBE rejected, subscription quota exceeded");
+                                status.push(SubscribeAckReason::QuotaExceeded);
+                                continue;
+                            }
                             if let Some(shared) = SharedSubscription::parse(filter) {
                                 info!(%peer, group = %shared.group, filter = %shared.filter.as_str(), ?granted, "SUBSCRIBE (shared)");
                                 hub.subscribe_shared(shared.group, id, shared.filter, granted, filter);
+                                active_filters.insert(key);
                                 status.push(granted_reason(granted));
                             } else if let Some(tf) = TopicFilter::parse(filter) {
                                 info!(%peer, %filter, ?granted, "SUBSCRIBE");
                                 hub.subscribe(id, tf.clone(), granted, filter);
+                                active_filters.insert(key);
                                 retained_jobs.push((tf, granted));
                                 status.push(granted_reason(granted));
                             } else {
@@ -280,6 +354,7 @@ where
                         let mut status = Vec::with_capacity(unsub.topic_filters.len());
                         for filter in &unsub.topic_filters {
                             let existed = hub.unsubscribe(id, filter);
+                            active_filters.remove(&filter.to_string());
                             info!(%peer, %filter, existed, "UNSUBSCRIBE");
                             status.push(if existed {
                                 UnsubscribeAckReason::Success
