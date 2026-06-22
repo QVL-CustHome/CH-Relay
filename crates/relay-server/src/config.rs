@@ -28,6 +28,8 @@ pub struct Config {
     pub tls_key: Option<PathBuf>,
     #[serde(default)]
     pub http_addr: Option<SocketAddr>,
+    #[serde(default = "default_http_allow_external")]
+    pub http_allow_external: bool,
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
     #[serde(default = "default_connect_timeout_ms")]
@@ -54,6 +56,9 @@ fn default_retry_max_secs() -> u64 {
 }
 fn default_event_log_max() -> u64 {
     100_000
+}
+fn default_http_allow_external() -> bool {
+    env_or("RELAY_HTTP_ALLOW_EXTERNAL", false)
 }
 fn default_max_connections() -> usize {
     env_or("RELAY_MAX_CONNECTIONS", 1000)
