@@ -110,13 +110,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("TLS disabled (set tls_cert + tls_key to enable mqtts)");
     }
 
-    if let Some(http_addr) = config.http_addr {
-        let http_listener = TcpListener::bind(http_addr).await?;
-        info!("relay dashboard on http://{http_addr}");
-        let hub = hub.clone();
-        tokio::spawn(dashboard::serve(http_listener, hub));
-    } else {
-        info!("dashboard disabled (set http_addr to enable)");
+    match config.http_addr {
+        None => info!("dashboard disabled (set http_addr to enable)"),
+        Some(http_addr) if http_addr.ip().is_loopback() => {
+            let http_listener = TcpListener::bind(http_addr).await?;
+            info!("relay dashboard on http://{http_addr} (loopback only)");
+            let hub = hub.clone();
+            tokio::spawn(dashboard::serve(http_listener, hub));
+        }
+        Some(http_addr) if config.http_allow_external => {
+            let http_listener = TcpListener::bind(http_addr).await?;
+            warn!(
+                "relay dashboard exposed on http://{http_addr} on a non-loopback interface WITHOUT authentication by explicit decision (http_allow_external=true); put it behind an authenticating reverse-proxy"
+            );
+            let hub = hub.clone();
+            tokio::spawn(dashboard::serve(http_listener, hub));
+        }
+        Some(http_addr) => {
+            warn!(
+                "dashboard disabled: http_addr {http_addr} is a non-loopback interface and would expose sensitive metrics without authentication; set RELAY_HTTP_ALLOW_EXTERNAL=true to allow it (ideally behind an authenticating reverse-proxy), or bind a loopback address (127.0.0.1 / ::1)"
+            );
+        }
     }
 
     loop {
