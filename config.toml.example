@@ -55,6 +55,12 @@ jwt_secret = "change-me-shared-secret-min-32-bytes"
 identity_claim = "sub"
 # Claim holding the principal's roles (a JSON array of strings).
 roles_claim = "roles"
+# Audience whitelist. A token is accepted only when its `aud` claim (a single
+# string OR a JSON array) contains at least one of these values. The `iss` claim
+# must equal "ch-api-authenticator" and `exp` must be present and unexpired.
+# If `allowed_audiences` is omitted here, falls back to RELAY_ALLOWED_AUDIENCES
+# (comma-separated), then to the defaults below.
+allowed_audiences = ["ch-api-drive", "ch-api-budgy", "ch-relay"]
 
 # ACL rules. A client receives the union of every rule whose `role` matches
 # one of its token roles (`role = "*"` matches any authenticated client).
@@ -69,6 +75,12 @@ roles_claim = "roles"
 role = "drive"
 publish   = ["drive/{sub}/#"]
 subscribe = ["drive/{sub}/#"]
+
+# Drive service backend: publish-only on upload event topics, no Drive subtree access.
+[[auth.acl]]
+role = "drive_service"
+publish   = ["users/+/files/+/uploaded"]
+subscribe = []
 
 # Admins: the whole Drive tree + the dead-letter stream.
 [[auth.acl]]

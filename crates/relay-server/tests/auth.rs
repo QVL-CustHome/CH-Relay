@@ -1,8 +1,3 @@
-//! End-to-end auth + ACL test against the real `relay` binary, configured with
-//! an `[auth]` block. Asserts: a CONNECT without a valid JWT is refused; a valid
-//! JWT connects; and the per-role ACL (templated with `{sub}`) scopes which
-//! topics the client may subscribe to.
-
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
@@ -16,7 +11,9 @@ use tokio::time::{sleep, timeout, Instant};
 use tokio_util::codec::Framed;
 
 const SECRET: &str = "e2e-auth-secret";
-const EXP: i64 = 4_102_444_800; // 2100-01-01, far future
+const EXP: i64 = 4_102_444_800;
+const ISS: &str = "ch-api-authenticator";
+const AUD: &str = "ch-api-drive";
 
 struct ChildGuard(Child);
 impl Drop for ChildGuard {
@@ -27,7 +24,7 @@ impl Drop for ChildGuard {
 }
 
 fn jwt(sub: &str, roles: &[&str]) -> String {
-    let claims = serde_json::json!({ "sub": sub, "roles": roles, "exp": EXP });
+    let claims = serde_json::json!({ "sub": sub, "roles": roles, "exp": EXP, "iss": ISS, "aud": AUD });
     encode(&Header::new(Algorithm::HS256), &claims, &EncodingKey::from_secret(SECRET.as_bytes()))
         .expect("encode jwt")
 }
@@ -122,7 +119,6 @@ async fn jwt_required_and_acl_scopes_topics() {
 
     let addr = format!("127.0.0.1:{tcp_port}");
 
-    // 1) No token → CONNECT refused with NotAuthorized.
     let mut anon = raw_connect(&addr).await;
     anon.send(Packet::from(connect_packet("anon", None))).await.expect("send CONNECT");
     match next_packet(&mut anon).await {
@@ -132,7 +128,6 @@ async fn jwt_required_and_acl_scopes_topics() {
         other => panic!("expected CONNACK, got {other:?}"),
     }
 
-    // 2) Valid token → CONNECT accepted.
     let token = jwt("u1", &["drive"]);
     let mut user = raw_connect(&addr).await;
     user.send(Packet::from(connect_packet("u1-dev", Some(&token)))).await.expect("send CONNECT");
@@ -143,7 +138,6 @@ async fn jwt_required_and_acl_scopes_topics() {
         other => panic!("expected CONNACK, got {other:?}"),
     }
 
-    // 3) ACL: own subtree granted, another user's subtree refused.
     let granted = subscribe(&mut user, 1, "drive/u1/files").await;
     assert_eq!(granted, SubscribeAckReason::GrantedQos0, "own subtree should be granted");
 

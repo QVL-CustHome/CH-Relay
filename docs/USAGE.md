@@ -404,6 +404,12 @@ role      = "drive"
 publish   = ["drive/{sub}/#"]
 subscribe = ["drive/{sub}/#"]
 
+# Drive service backend: publish-only on upload event topics, no subtree access.
+[[auth.acl]]
+role      = "drive_service"
+publish   = ["users/+/files/+/uploaded"]
+subscribe = []
+
 # Admins: the whole tree + dead letters.
 [[auth.acl]]
 role      = "drive_admin"
