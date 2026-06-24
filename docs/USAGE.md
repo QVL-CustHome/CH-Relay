@@ -398,9 +398,9 @@ jwt_secret     = "…shared secret…"
 identity_claim = "sub"      # default
 roles_claim    = "roles"    # default
 
-# Each user: only their own subtree.
+# Drive users: only their own subtree (requires the `drive` role).
 [[auth.acl]]
-role      = "*"
+role      = "drive"
 publish   = ["drive/{sub}/#"]
 subscribe = ["drive/{sub}/#"]
 

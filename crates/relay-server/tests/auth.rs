@@ -106,7 +106,7 @@ async fn jwt_required_and_acl_scopes_topics() {
              jwt_secret = \"{SECRET}\"\n\
              \n\
              [[auth.acl]]\n\
-             role = \"*\"\n\
+             role = \"drive\"\n\
              publish = [\"drive/{{sub}}/#\"]\n\
              subscribe = [\"drive/{{sub}}/#\"]\n"
         ),
@@ -149,4 +149,24 @@ async fn jwt_required_and_acl_scopes_topics() {
 
     let denied = subscribe(&mut user, 2, "drive/u2/files").await;
     assert_eq!(denied, SubscribeAckReason::NotAuthorized, "another user's subtree must be refused");
+
+    let no_role_token = jwt("u3", &["other"]);
+    let mut no_role = raw_connect(&addr).await;
+    no_role
+        .send(Packet::from(connect_packet("u3-dev", Some(&no_role_token))))
+        .await
+        .expect("send CONNECT");
+    match next_packet(&mut no_role).await {
+        Packet::ConnectAck(ack) => {
+            assert_eq!(ack.reason_code, ConnectAckReason::Success, "valid jwt connects");
+        }
+        other => panic!("expected CONNACK, got {other:?}"),
+    }
+
+    let no_role_denied = subscribe(&mut no_role, 1, "drive/u3/files").await;
+    assert_eq!(
+        no_role_denied,
+        SubscribeAckReason::NotAuthorized,
+        "client without drive role must be refused its own subtree"
+    );
 }

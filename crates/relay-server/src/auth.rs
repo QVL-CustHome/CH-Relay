@@ -131,7 +131,7 @@ mod tests {
             identity_claim: "sub".into(),
             roles_claim: "roles".into(),
             acl: vec![
-                AclRule { role: "*".into(), publish: vec!["drive/{sub}/#".into()], subscribe: vec!["drive/{sub}/#".into()] },
+                AclRule { role: "drive".into(), publish: vec!["drive/{sub}/#".into()], subscribe: vec!["drive/{sub}/#".into()] },
                 AclRule { role: "drive_admin".into(), publish: vec!["drive/#".into()], subscribe: vec!["drive/#".into()] },
             ],
         }

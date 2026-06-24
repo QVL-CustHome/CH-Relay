@@ -64,9 +64,9 @@ roles_claim = "roles"
 # subscribe requires the requested filter to be *subsumed* by an allowed
 # pattern (a client can't widen its reach with `#`).
 
-# Every authenticated user: only their own Drive subtree.
+# Drive users: only their own Drive subtree (requires the `drive` role).
 [[auth.acl]]
-role = "*"
+role = "drive"
 publish   = ["drive/{sub}/#"]
 subscribe = ["drive/{sub}/#"]
 
