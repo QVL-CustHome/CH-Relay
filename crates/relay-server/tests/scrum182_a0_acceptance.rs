@@ -1,22 +1,27 @@
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
+use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use rmqtt_codec::types::Publish;
 use rmqtt_codec::v5::{
     Codec, Connect, ConnectAckReason, Packet, PublishAckReason, PublishProperties, QoS, Subscribe,
     SubscribeAckReason, SubscriptionOptions,
 };
+use serde_json::{json, Value};
 use std::process::{Child, Command};
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::time::{sleep, timeout, Instant};
 use tokio_util::codec::Framed;
 
-const REAL_CONFIG: &str = r"C:\CustHome\CH-Relay\config.toml";
-const REAL_DRIVE_ENV: &str = r"C:\CustHome\CH-Api-Drive\.env";
-const UPLOAD_TOPIC: &str = "users/u-owner-1/files/file-42/uploaded";
-const OTHER_EVENT_TOPIC: &str = "users/u-owner-1/files/file-42/created";
-const OTHER_USER_TREE: &str = "users/u-owner-2/files/file-99/uploaded";
-const NON_BUSINESS_TREE: &str = "events/u-owner-1/files/file-42/uploaded";
+const SECRET: &str = "scrum182-shared-secret-min-32-bytes-long";
+const ISS: &str = "ch-api-authenticator";
+const SERVICE_AUD: &str = "ch-relay";
+const FUTURE_EXP: i64 = 4_102_444_800;
+
+const UPLOAD_TOPIC: &str = "drive/owner-opaque-1/files/file-42/uploaded";
+const OTHER_EVENT_TOPIC: &str = "drive/owner-opaque-1/files/file-42/created";
+const OTHER_OWNER_UPLOAD: &str = "drive/owner-opaque-2/files/file-99/uploaded";
+const NON_BUSINESS_TREE: &str = "events/owner-opaque-1/files/file-42/uploaded";
 
 type Client = Framed<TcpStream, Codec>;
 
@@ -28,14 +33,23 @@ impl Drop for ChildGuard {
     }
 }
 
-fn read_service_token() -> String {
-    let content = std::fs::read_to_string(REAL_DRIVE_ENV).expect("read CH-Api-Drive/.env");
-    for line in content.lines() {
-        if let Some(rest) = line.strip_prefix("RELAY_SERVICE_TOKEN=") {
-            return rest.trim().to_string();
-        }
-    }
-    panic!("RELAY_SERVICE_TOKEN not found in CH-Api-Drive/.env");
+fn sign(claims: Value) -> String {
+    encode(
+        &Header::new(Algorithm::HS256),
+        &claims,
+        &EncodingKey::from_secret(SECRET.as_bytes()),
+    )
+    .expect("encode jwt")
+}
+
+fn service_token() -> String {
+    sign(json!({
+        "sub": "svc-drive",
+        "roles": ["drive_service"],
+        "iss": ISS,
+        "exp": FUTURE_EXP,
+        "aud": SERVICE_AUD,
+    }))
 }
 
 fn connect_packet(client_id: &str, token: &str) -> Connect {
@@ -131,58 +145,65 @@ async fn subscribe_result(client: &mut Client, topic: &str, packet_id: u16) -> S
     }
 }
 
-fn boot_real_relay(tcp_port: u16) -> ChildGuard {
-    let real = std::fs::read_to_string(REAL_CONFIG).expect("read real config.toml");
-    let mut rebound = String::new();
-    for line in real.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("tcp_addr") {
-            rebound.push_str(&format!("tcp_addr = \"127.0.0.1:{tcp_port}\"\n"));
-        } else if trimmed.starts_with("ws_addr") {
-            rebound.push_str(&format!("ws_addr = \"127.0.0.1:{}\"\n", tcp_port + 1000));
-        } else if trimmed.starts_with("http_addr") {
-            rebound.push_str(&format!("http_addr = \"127.0.0.1:{}\"\n", tcp_port + 2000));
-        } else {
-            rebound.push_str(line);
-            rebound.push('\n');
-        }
-    }
+fn boot_loopback_relay(tcp_port: u16) -> ChildGuard {
+    let cfg_body = format!(
+        "tcp_addr = \"127.0.0.1:{tcp_port}\"\n\
+         ws_addr = \"127.0.0.1:{}\"\n\
+         http_addr = \"127.0.0.1:{}\"\n\
+         [auth]\n\
+         jwt_secret = \"{SECRET}\"\n\
+         identity_claim = \"sub\"\n\
+         roles_claim = \"roles\"\n\
+         allowed_audiences = [\"ch-api-drive\", \"ch-api-budgy\", \"ch-relay\"]\n\
+         [[auth.acl]]\n\
+         role = \"drive\"\n\
+         publish = [\"drive/{{sub}}/#\"]\n\
+         subscribe = [\"drive/{{sub}}/#\"]\n\
+         [[auth.acl]]\n\
+         role = \"drive_service\"\n\
+         publish = [\"drive/+/files/+/uploaded\"]\n\
+         subscribe = []\n\
+         [[auth.acl]]\n\
+         role = \"drive_admin\"\n\
+         publish = [\"drive/#\"]\n\
+         subscribe = [\"drive/#\", \"$dlq/#\"]\n",
+        tcp_port + 1000,
+        tcp_port + 2000,
+    );
 
     let cfg = std::env::temp_dir().join(format!("relay-scrum182-{tcp_port}.toml"));
-    std::fs::write(&cfg, rebound).expect("write per-test config");
+    std::fs::write(&cfg, cfg_body).expect("write per-test config");
 
     let child = Command::new(env!("CARGO_BIN_EXE_relay"))
         .env("RELAY_CONFIG", &cfg)
         .env("RUST_LOG", "off")
         .spawn()
-        .expect("spawn relay binary against rebound real config");
+        .expect("spawn relay binary against loopback config");
     ChildGuard(child)
 }
 
 #[tokio::test]
-async fn ac2_service_identity_connects_with_real_token() {
+async fn ac2_service_identity_connects_with_service_token() {
     let port = 21982;
-    let _guard = boot_real_relay(port);
+    let _guard = boot_loopback_relay(port);
     let addr = format!("127.0.0.1:{port}");
-    let token = read_service_token();
 
-    let (_client, reason) = connect_as_service(&addr, "svc-drive", &token).await;
+    let (_client, reason) = connect_as_service(&addr, "svc-drive", &service_token()).await;
 
     assert_eq!(
         reason,
         ConnectAckReason::Success,
-        "AC2: svc-drive must authenticate successfully with the provisioned service JWT"
+        "AC2: svc-drive must authenticate successfully with the service JWT"
     );
 }
 
 #[tokio::test]
 async fn ac3_publish_allowed_on_upload_event_topic() {
     let port = 21983;
-    let _guard = boot_real_relay(port);
+    let _guard = boot_loopback_relay(port);
     let addr = format!("127.0.0.1:{port}");
-    let token = read_service_token();
 
-    let (mut client, conn) = connect_as_service(&addr, "svc-drive", &token).await;
+    let (mut client, conn) = connect_as_service(&addr, "svc-drive", &service_token()).await;
     assert_eq!(conn, ConnectAckReason::Success);
 
     let reason = publish_result(&mut client, UPLOAD_TOPIC, 1).await;
@@ -190,18 +211,17 @@ async fn ac3_publish_allowed_on_upload_event_topic() {
     assert_eq!(
         reason,
         PublishAckReason::Success,
-        "AC3: publish on users/{{owner}}/files/{{file}}/uploaded must be authorized"
+        "AC3: publish on drive/{{owner_id}}/files/{{file_id}}/uploaded must be authorized"
     );
 }
 
 #[tokio::test]
-async fn ac3_publish_rejected_on_other_event_same_user() {
+async fn ac3_publish_rejected_on_other_event_same_owner() {
     let port = 21984;
-    let _guard = boot_real_relay(port);
+    let _guard = boot_loopback_relay(port);
     let addr = format!("127.0.0.1:{port}");
-    let token = read_service_token();
 
-    let (mut client, conn) = connect_as_service(&addr, "svc-drive", &token).await;
+    let (mut client, conn) = connect_as_service(&addr, "svc-drive", &service_token()).await;
     assert_eq!(conn, ConnectAckReason::Success);
 
     let reason = publish_result(&mut client, OTHER_EVENT_TOPIC, 1).await;
@@ -214,32 +234,30 @@ async fn ac3_publish_rejected_on_other_event_same_user() {
 }
 
 #[tokio::test]
-async fn ac3_publish_rejected_on_other_user_tree() {
+async fn ac3_publish_allowed_on_any_owner_upload_via_wildcard() {
     let port = 21985;
-    let _guard = boot_real_relay(port);
+    let _guard = boot_loopback_relay(port);
     let addr = format!("127.0.0.1:{port}");
-    let token = read_service_token();
 
-    let (mut client, conn) = connect_as_service(&addr, "svc-drive", &token).await;
+    let (mut client, conn) = connect_as_service(&addr, "svc-drive", &service_token()).await;
     assert_eq!(conn, ConnectAckReason::Success);
 
-    let reason = publish_result(&mut client, OTHER_USER_TREE, 1).await;
+    let reason = publish_result(&mut client, OTHER_OWNER_UPLOAD, 1).await;
 
     assert_eq!(
         reason,
         PublishAckReason::Success,
-        "AC3 sentinel: wildcard owner means any user's uploaded topic is publishable by the service"
+        "AC3: drive/+/files/+/uploaded grants the service any owner's uploaded topic"
     );
 }
 
 #[tokio::test]
-async fn ac3_publish_rejected_outside_business_tree() {
+async fn ac3_publish_rejected_outside_drive_tree() {
     let port = 21986;
-    let _guard = boot_real_relay(port);
+    let _guard = boot_loopback_relay(port);
     let addr = format!("127.0.0.1:{port}");
-    let token = read_service_token();
 
-    let (mut client, conn) = connect_as_service(&addr, "svc-drive", &token).await;
+    let (mut client, conn) = connect_as_service(&addr, "svc-drive", &service_token()).await;
     assert_eq!(conn, ConnectAckReason::Success);
 
     let reason = publish_result(&mut client, NON_BUSINESS_TREE, 1).await;
@@ -247,18 +265,17 @@ async fn ac3_publish_rejected_outside_business_tree() {
     assert_eq!(
         reason,
         PublishAckReason::NotAuthorized,
-        "AC3: publish outside the users/... business tree must be rejected"
+        "AC3: publish outside the drive/... business tree must be rejected"
     );
 }
 
 #[tokio::test]
 async fn ac3_subscribe_rejected_on_upload_topic() {
     let port = 21987;
-    let _guard = boot_real_relay(port);
+    let _guard = boot_loopback_relay(port);
     let addr = format!("127.0.0.1:{port}");
-    let token = read_service_token();
 
-    let (mut client, conn) = connect_as_service(&addr, "svc-drive", &token).await;
+    let (mut client, conn) = connect_as_service(&addr, "svc-drive", &service_token()).await;
     assert_eq!(conn, ConnectAckReason::Success);
 
     let reason = subscribe_result(&mut client, UPLOAD_TOPIC, 1).await;
@@ -273,7 +290,7 @@ async fn ac3_subscribe_rejected_on_upload_topic() {
 #[tokio::test]
 async fn ac2_connect_refused_with_tampered_token() {
     let port = 21988;
-    let _guard = boot_real_relay(port);
+    let _guard = boot_loopback_relay(port);
     let addr = format!("127.0.0.1:{port}");
     let bad = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJzdmMtZHJpdmUiLCJyb2xlcyI6WyJkcml2ZV9zZXJ2aWNlIl19.tampered";
 
@@ -289,11 +306,10 @@ async fn ac2_connect_refused_with_tampered_token() {
 #[tokio::test]
 async fn residual_wildcard_no_longer_grants_drive_subtree() {
     let port = 21989;
-    let _guard = boot_real_relay(port);
+    let _guard = boot_loopback_relay(port);
     let addr = format!("127.0.0.1:{port}");
-    let token = read_service_token();
 
-    let (mut client, conn) = connect_as_service(&addr, "svc-drive", &token).await;
+    let (mut client, conn) = connect_as_service(&addr, "svc-drive", &service_token()).await;
     assert_eq!(conn, ConnectAckReason::Success);
 
     let pub_reason = publish_result(&mut client, "drive/svc-drive/anything", 1).await;
@@ -302,11 +318,11 @@ async fn residual_wildcard_no_longer_grants_drive_subtree() {
     assert_eq!(
         pub_reason,
         PublishAckReason::NotAuthorized,
-        "SCRUM-265: drive/{{sub}}/# now requires the drive role, the residual wildcard lane must not grant it to the drive service"
+        "the drive_service role only grants drive/+/files/+/uploaded, not the whole drive subtree"
     );
     assert_eq!(
         sub_reason,
         SubscribeAckReason::NotAuthorized,
-        "SCRUM-265: drive/{{sub}}/# now requires the drive role, the residual wildcard lane must not grant it to the drive service"
+        "the drive_service role is publish-only and scoped to the uploaded topic"
     );
 }

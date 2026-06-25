@@ -16,7 +16,7 @@ then come back here for detail.
 
 | Transport | Default address | Use it for | Enabled |
 |---|---|---|---|
-| **TCP** (`mqtt://`) | `0.0.0.0:1883` | backends: Rust, Go, Java, Node, Python… | always |
+| **TCP** (`mqtt://`) | `127.0.0.1:1883` | backends: Rust, Go, Java, Node, Python… | always |
 | **WebSocket** (`ws://`) | `0.0.0.0:8083` | browsers and mobile (subprotocol `mqtt`) | always |
 | **TLS** (`mqtts://`) | `0.0.0.0:8883` | encrypted native connections | when `tls_cert` + `tls_key` are set |
 | **HTTP dashboard** | `127.0.0.1:8080` (example) | monitoring (`/`, `/stats`) | when `http_addr` is set |
@@ -279,7 +279,7 @@ Server config is TOML (path via `RELAY_CONFIG`, default `config.toml`). All keys
 are optional; defaults shown.
 
 ```toml
-tcp_addr = "0.0.0.0:1883"     # native MQTT listener
+tcp_addr = "127.0.0.1:1883"   # native MQTT listener (loopback, mono-host)
 ws_addr  = "0.0.0.0:8083"     # MQTT-over-WebSocket listener
 
 # Persistence (off by default). When set, retained messages, durable sessions,
@@ -404,10 +404,11 @@ role      = "drive"
 publish   = ["drive/{sub}/#"]
 subscribe = ["drive/{sub}/#"]
 
-# Drive service backend: publish-only on upload event topics, no subtree access.
+# Drive service backend: publish-only on upload event topics within the Drive
+# tree, so each owner receives them on their own `drive/{sub}/#` lane.
 [[auth.acl]]
 role      = "drive_service"
-publish   = ["users/+/files/+/uploaded"]
+publish   = ["drive/+/files/+/uploaded"]
 subscribe = []
 
 # Admins: the whole tree + dead letters.

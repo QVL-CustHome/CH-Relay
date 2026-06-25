@@ -6,7 +6,7 @@
 # open / anonymous mode.
 
 # TCP listener for native MQTT clients (Rust, Go, Java backends).
-tcp_addr = "0.0.0.0:1883"
+tcp_addr = "127.0.0.1:1883"
 
 # WebSocket listener for browser / mobile clients (MQTT-over-WebSocket).
 ws_addr = "0.0.0.0:8083"
@@ -76,10 +76,9 @@ role = "drive"
 publish   = ["drive/{sub}/#"]
 subscribe = ["drive/{sub}/#"]
 
-# Drive service backend: publish-only on upload event topics, no Drive subtree access.
 [[auth.acl]]
 role = "drive_service"
-publish   = ["users/+/files/+/uploaded"]
+publish   = ["drive/+/files/+/uploaded"]
 subscribe = []
 
 # Admins: the whole Drive tree + the dead-letter stream.
