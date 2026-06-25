@@ -1,0 +1,6 @@
+# SCRUM-263 — warning "unmaintained" sans vuln active.
+# RUSTSEC-2025-0134 (rustls-pemfile) : dependance directe pour le chargement PEM
+# des certs mqtts. Migration vers rustls-pki-types::pem possible mais reportee
+# (tache dev separee).
+[advisories]
+ignore = ["RUSTSEC-2025-0134"]
