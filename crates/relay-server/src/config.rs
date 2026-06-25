@@ -40,7 +40,7 @@ pub struct Config {
 }
 
 fn default_tcp_addr() -> SocketAddr {
-    "0.0.0.0:1883".parse().unwrap()
+    "127.0.0.1:1883".parse().unwrap()
 }
 fn default_ws_addr() -> SocketAddr {
     "0.0.0.0:8083".parse().unwrap()

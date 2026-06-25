@@ -36,7 +36,7 @@ Two crates (mirrors AIGate's `*-core` / `*-server` split):
 
 ```bash
 cargo run -p relay-server
-# relay listening on tcp://0.0.0.0:1883
+# relay listening on tcp://127.0.0.1:1883
 # relay listening on ws://0.0.0.0:8083
 ```
 
