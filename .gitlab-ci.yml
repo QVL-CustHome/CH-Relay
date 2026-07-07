@@ -1,0 +1,17 @@
+# CI/CD CH-Relay — base commune : template rust QVL-ToolBox/PipeLine
+include:
+  - remote: "https://raw.githubusercontent.com/QVL-ToolBox/PipeLine/main/rust.gitlab-ci.yml"
+
+stages:
+  - test
+  - build
+  - deploy
+
+deploy:
+  stage: deploy
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  dependencies:
+    - build
+  script:
+    - sudo /usr/local/bin/ch-deploy-bin ch-relay "$CI_PROJECT_DIR/target/release/relay"
