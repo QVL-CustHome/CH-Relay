@@ -24,9 +24,14 @@ impl Drop for ChildGuard {
 }
 
 fn jwt(sub: &str, roles: &[&str]) -> String {
-    let claims = serde_json::json!({ "sub": sub, "roles": roles, "exp": EXP, "iss": ISS, "aud": AUD });
-    encode(&Header::new(Algorithm::HS256), &claims, &EncodingKey::from_secret(SECRET.as_bytes()))
-        .expect("encode jwt")
+    let claims =
+        serde_json::json!({ "sub": sub, "roles": roles, "exp": EXP, "iss": ISS, "aud": AUD });
+    encode(
+        &Header::new(Algorithm::HS256),
+        &claims,
+        &EncodingKey::from_secret(SECRET.as_bytes()),
+    )
+    .expect("encode jwt")
 }
 
 fn connect_packet(client_id: &str, password: Option<&str>) -> Connect {
@@ -120,29 +125,49 @@ async fn jwt_required_and_acl_scopes_topics() {
     let addr = format!("127.0.0.1:{tcp_port}");
 
     let mut anon = raw_connect(&addr).await;
-    anon.send(Packet::from(connect_packet("anon", None))).await.expect("send CONNECT");
+    anon.send(Packet::from(connect_packet("anon", None)))
+        .await
+        .expect("send CONNECT");
     match next_packet(&mut anon).await {
         Packet::ConnectAck(ack) => {
-            assert_eq!(ack.reason_code, ConnectAckReason::NotAuthorized, "expected rejection");
+            assert_eq!(
+                ack.reason_code,
+                ConnectAckReason::NotAuthorized,
+                "expected rejection"
+            );
         }
         other => panic!("expected CONNACK, got {other:?}"),
     }
 
     let token = jwt("u1", &["drive"]);
     let mut user = raw_connect(&addr).await;
-    user.send(Packet::from(connect_packet("u1-dev", Some(&token)))).await.expect("send CONNECT");
+    user.send(Packet::from(connect_packet("u1-dev", Some(&token))))
+        .await
+        .expect("send CONNECT");
     match next_packet(&mut user).await {
         Packet::ConnectAck(ack) => {
-            assert_eq!(ack.reason_code, ConnectAckReason::Success, "expected success");
+            assert_eq!(
+                ack.reason_code,
+                ConnectAckReason::Success,
+                "expected success"
+            );
         }
         other => panic!("expected CONNACK, got {other:?}"),
     }
 
     let granted = subscribe(&mut user, 1, "drive/u1/files").await;
-    assert_eq!(granted, SubscribeAckReason::GrantedQos0, "own subtree should be granted");
+    assert_eq!(
+        granted,
+        SubscribeAckReason::GrantedQos0,
+        "own subtree should be granted"
+    );
 
     let denied = subscribe(&mut user, 2, "drive/u2/files").await;
-    assert_eq!(denied, SubscribeAckReason::NotAuthorized, "another user's subtree must be refused");
+    assert_eq!(
+        denied,
+        SubscribeAckReason::NotAuthorized,
+        "another user's subtree must be refused"
+    );
 
     let no_role_token = jwt("u3", &["other"]);
     let mut no_role = raw_connect(&addr).await;
@@ -152,7 +177,11 @@ async fn jwt_required_and_acl_scopes_topics() {
         .expect("send CONNECT");
     match next_packet(&mut no_role).await {
         Packet::ConnectAck(ack) => {
-            assert_eq!(ack.reason_code, ConnectAckReason::Success, "valid jwt connects");
+            assert_eq!(
+                ack.reason_code,
+                ConnectAckReason::Success,
+                "valid jwt connects"
+            );
         }
         other => panic!("expected CONNACK, got {other:?}"),
     }

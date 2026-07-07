@@ -165,7 +165,12 @@ impl Storage {
 
     /// Persist a single subscription of `client_id` (`raw` is the filter string
     /// as the client sent it).
-    pub fn put_subscription(&self, client_id: &str, raw: &str, qos: QoS) -> Result<(), redb::Error> {
+    pub fn put_subscription(
+        &self,
+        client_id: &str,
+        raw: &str,
+        qos: QoS,
+    ) -> Result<(), redb::Error> {
         let key = format!("{client_id}{SEP}{raw}");
         let txn = self.db.begin_write()?;
         {
@@ -249,7 +254,9 @@ impl Storage {
             table.insert(offset, blob)?;
             if retention > 0 {
                 while table.len()? > retention {
-                    let Some(oldest) = table.first()?.map(|(k, _)| k.value()) else { break };
+                    let Some(oldest) = table.first()?.map(|(k, _)| k.value()) else {
+                        break;
+                    };
                     table.remove(oldest)?;
                 }
             }
@@ -307,7 +314,10 @@ impl Storage {
             let key = key.value();
             let bytes = value.value();
             if let Some((client_id, raw)) = key.split_once(SEP) {
-                let qos = bytes.first().and_then(|b| QoS::from_u8(*b)).unwrap_or(QoS::AtMostOnce);
+                let qos = bytes
+                    .first()
+                    .and_then(|b| QoS::from_u8(*b))
+                    .unwrap_or(QoS::AtMostOnce);
                 subs_by_client
                     .entry(client_id.to_string())
                     .or_default()
@@ -334,15 +344,41 @@ impl Storage {
 /// A single durable write to apply against [`Storage`]. Queued by the hub and
 /// drained, in order, by the persistence worker thread.
 pub enum PersistOp {
-    PutSession { client_id: String, expiry_secs: u32 },
-    RemoveSession { client_id: String },
-    PutSubscription { client_id: String, raw: String, qos: QoS },
-    RemoveSubscription { client_id: String, raw: String },
-    PutInflight { client_id: String, blob: Vec<u8> },
-    PutRetained { topic: String, payload: Bytes, qos: QoS },
-    AppendDeadLetter { blob: Vec<u8> },
-    AppendEvent { blob: Vec<u8>, retention: u64 },
-    Flush { ack: oneshot::Sender<()> },
+    PutSession {
+        client_id: String,
+        expiry_secs: u32,
+    },
+    RemoveSession {
+        client_id: String,
+    },
+    PutSubscription {
+        client_id: String,
+        raw: String,
+        qos: QoS,
+    },
+    RemoveSubscription {
+        client_id: String,
+        raw: String,
+    },
+    PutInflight {
+        client_id: String,
+        blob: Vec<u8>,
+    },
+    PutRetained {
+        topic: String,
+        payload: Bytes,
+        qos: QoS,
+    },
+    AppendDeadLetter {
+        blob: Vec<u8>,
+    },
+    AppendEvent {
+        blob: Vec<u8>,
+        retention: u64,
+    },
+    Flush {
+        ack: oneshot::Sender<()>,
+    },
 }
 
 /// Hub-side handle to the persistence worker: enqueues [`PersistOp`]s without
@@ -397,20 +433,25 @@ fn apply_persist_op(storage: &Storage, op: PersistOp) {
             let _ = ack.send(());
             return;
         }
-        PersistOp::PutSession { client_id, expiry_secs } => {
-            storage.put_session(&client_id, expiry_secs)
-        }
+        PersistOp::PutSession {
+            client_id,
+            expiry_secs,
+        } => storage.put_session(&client_id, expiry_secs),
         PersistOp::RemoveSession { client_id } => storage.remove_session(&client_id),
-        PersistOp::PutSubscription { client_id, raw, qos } => {
-            storage.put_subscription(&client_id, &raw, qos)
-        }
+        PersistOp::PutSubscription {
+            client_id,
+            raw,
+            qos,
+        } => storage.put_subscription(&client_id, &raw, qos),
         PersistOp::RemoveSubscription { client_id, raw } => {
             storage.remove_subscription(&client_id, &raw)
         }
         PersistOp::PutInflight { client_id, blob } => storage.put_inflight(&client_id, &blob),
-        PersistOp::PutRetained { topic, payload, qos } => {
-            storage.put_retained(&topic, &payload, qos)
-        }
+        PersistOp::PutRetained {
+            topic,
+            payload,
+            qos,
+        } => storage.put_retained(&topic, &payload, qos),
         PersistOp::AppendDeadLetter { blob } => storage.append_dead_letter(&blob),
         PersistOp::AppendEvent { blob, retention } => {
             storage.append_event(&blob, retention).map(|_| ())

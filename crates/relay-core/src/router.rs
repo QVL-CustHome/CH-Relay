@@ -62,7 +62,10 @@ impl Router {
     /// the same filter updates its granted QoS (MQTT replaces the subscription).
     pub fn subscribe(&mut self, client: ClientId, filter: TopicFilter, qos: QoS) {
         let subs = self.normal.entry(client).or_default();
-        match subs.iter_mut().find(|s| s.filter.as_str() == filter.as_str()) {
+        match subs
+            .iter_mut()
+            .find(|s| s.filter.as_str() == filter.as_str())
+        {
             Some(existing) => existing.qos = qos,
             None => subs.push(Sub { filter, qos }),
         }
@@ -213,7 +216,10 @@ mod tests {
             ids(r.matching_subscribers("sensors/eu/temp")),
             vec![ClientId(1), ClientId(2)]
         );
-        assert_eq!(ids(r.matching_subscribers("orders/created")), vec![ClientId(3)]);
+        assert_eq!(
+            ids(r.matching_subscribers("orders/created")),
+            vec![ClientId(3)]
+        );
         assert!(r.matching_subscribers("nothing/here").is_empty());
     }
 
@@ -267,7 +273,10 @@ mod tests {
         r.subscribe(ClientId(1), filter("a/b"), QoS::AtMostOnce);
         r.subscribe(ClientId(2), filter("a/b"), QoS::AtMostOnce);
 
-        assert!(r.unsubscribe(ClientId(1), "a/b"), "should report the sub existed");
+        assert!(
+            r.unsubscribe(ClientId(1), "a/b"),
+            "should report the sub existed"
+        );
         assert!(!r.unsubscribe(ClientId(1), "a/b"), "second time it's gone");
         assert_eq!(ids(r.matching_subscribers("a/b")), vec![ClientId(2)]);
 
@@ -278,8 +287,18 @@ mod tests {
     #[test]
     fn unsubscribe_shared_removes_one_member() {
         let mut r = Router::new();
-        r.subscribe_shared("workers".into(), ClientId(1), filter("jobs"), QoS::AtMostOnce);
-        r.subscribe_shared("workers".into(), ClientId(2), filter("jobs"), QoS::AtMostOnce);
+        r.subscribe_shared(
+            "workers".into(),
+            ClientId(1),
+            filter("jobs"),
+            QoS::AtMostOnce,
+        );
+        r.subscribe_shared(
+            "workers".into(),
+            ClientId(2),
+            filter("jobs"),
+            QoS::AtMostOnce,
+        );
 
         assert!(r.unsubscribe_shared("workers", ClientId(1), "jobs"));
         assert!(!r.unsubscribe_shared("workers", ClientId(1), "jobs"));
@@ -292,9 +311,24 @@ mod tests {
     fn shared_group_distributes_round_robin() {
         let mut r = Router::new();
         // Three workers competing on the same shared filter.
-        r.subscribe_shared("workers".into(), ClientId(1), filter("jobs"), QoS::AtMostOnce);
-        r.subscribe_shared("workers".into(), ClientId(2), filter("jobs"), QoS::AtMostOnce);
-        r.subscribe_shared("workers".into(), ClientId(3), filter("jobs"), QoS::AtMostOnce);
+        r.subscribe_shared(
+            "workers".into(),
+            ClientId(1),
+            filter("jobs"),
+            QoS::AtMostOnce,
+        );
+        r.subscribe_shared(
+            "workers".into(),
+            ClientId(2),
+            filter("jobs"),
+            QoS::AtMostOnce,
+        );
+        r.subscribe_shared(
+            "workers".into(),
+            ClientId(3),
+            filter("jobs"),
+            QoS::AtMostOnce,
+        );
 
         // Each published message goes to exactly one worker, rotating.
         assert_eq!(ids(r.route("jobs")), vec![ClientId(1)]);
@@ -307,8 +341,18 @@ mod tests {
     fn shared_and_normal_coexist() {
         let mut r = Router::new();
         r.subscribe(ClientId(9), filter("jobs"), QoS::AtMostOnce); // normal: gets every message
-        r.subscribe_shared("workers".into(), ClientId(1), filter("jobs"), QoS::AtMostOnce);
-        r.subscribe_shared("workers".into(), ClientId(2), filter("jobs"), QoS::AtMostOnce);
+        r.subscribe_shared(
+            "workers".into(),
+            ClientId(1),
+            filter("jobs"),
+            QoS::AtMostOnce,
+        );
+        r.subscribe_shared(
+            "workers".into(),
+            ClientId(2),
+            filter("jobs"),
+            QoS::AtMostOnce,
+        );
 
         // Normal subscriber (9) always present; the group contributes one worker.
         assert_eq!(ids(r.route("jobs")), vec![ClientId(1), ClientId(9)]);
@@ -334,8 +378,18 @@ mod tests {
     #[test]
     fn removing_client_cleans_shared_group() {
         let mut r = Router::new();
-        r.subscribe_shared("workers".into(), ClientId(1), filter("jobs"), QoS::AtMostOnce);
-        r.subscribe_shared("workers".into(), ClientId(2), filter("jobs"), QoS::AtMostOnce);
+        r.subscribe_shared(
+            "workers".into(),
+            ClientId(1),
+            filter("jobs"),
+            QoS::AtMostOnce,
+        );
+        r.subscribe_shared(
+            "workers".into(),
+            ClientId(2),
+            filter("jobs"),
+            QoS::AtMostOnce,
+        );
 
         r.remove_client(ClientId(1));
         // Only worker 2 remains, so it gets everything.

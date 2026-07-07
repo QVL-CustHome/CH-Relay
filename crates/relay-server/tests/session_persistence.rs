@@ -26,8 +26,12 @@ const EXP: i64 = 4_102_444_800;
 
 fn jwt(sub: &str, roles: &[&str]) -> String {
     let claims = serde_json::json!({ "sub": sub, "roles": roles, "exp": EXP });
-    encode(&Header::new(Algorithm::HS256), &claims, &EncodingKey::from_secret(SECRET.as_bytes()))
-        .expect("encode jwt")
+    encode(
+        &Header::new(Algorithm::HS256),
+        &claims,
+        &EncodingKey::from_secret(SECRET.as_bytes()),
+    )
+    .expect("encode jwt")
 }
 
 struct ChildGuard(Child);
@@ -84,7 +88,12 @@ async fn connect(addr: &str, client_id: &str, clean_start: bool, expiry: u32) ->
     };
     let mut framed = Framed::new(stream, Codec::new(256 * 1024, 0));
     framed
-        .send(Packet::from(connect_packet(client_id, clean_start, expiry, &jwt(client_id, &["*"]))))
+        .send(Packet::from(connect_packet(
+            client_id,
+            clean_start,
+            expiry,
+            &jwt(client_id, &["*"]),
+        )))
         .await
         .expect("send CONNECT");
     match next_packet(&mut framed).await {
@@ -169,7 +178,10 @@ async fn durable_subscription_survives_a_restart() {
     // --- Second run: reconnect resumes the persisted session. ---
     let _broker = spawn_broker(&cfg_path);
     let (mut sub, present) = connect(&addr, "fleet-consumer", false, 3600).await;
-    assert!(present, "the durable session should be restored after restart");
+    assert!(
+        present,
+        "the durable session should be restored after restart"
+    );
 
     // Without re-subscribing, a published message must reach the resumed session.
     let (mut publisher, _) = connect(&addr, "publisher", true, 0).await;

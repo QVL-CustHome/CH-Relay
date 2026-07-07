@@ -25,8 +25,12 @@ const EXP: i64 = 4_102_444_800;
 
 fn jwt(sub: &str, roles: &[&str]) -> String {
     let claims = serde_json::json!({ "sub": sub, "roles": roles, "exp": EXP });
-    encode(&Header::new(Algorithm::HS256), &claims, &EncodingKey::from_secret(SECRET.as_bytes()))
-        .expect("encode jwt")
+    encode(
+        &Header::new(Algorithm::HS256),
+        &claims,
+        &EncodingKey::from_secret(SECRET.as_bytes()),
+    )
+    .expect("encode jwt")
 }
 
 struct ChildGuard(Child);
@@ -60,7 +64,12 @@ impl WsClient {
             codec: Codec::new(256 * 1024, 0),
             rbuf: BytesMut::new(),
         };
-        client.send(Packet::from(connect_packet(client_id, &jwt(client_id, &["*"])))).await;
+        client
+            .send(Packet::from(connect_packet(
+                client_id,
+                &jwt(client_id, &["*"]),
+            )))
+            .await;
         match client.recv().await {
             Packet::ConnectAck(_) => {}
             other => panic!("expected CONNACK, got {other:?}"),
@@ -178,7 +187,11 @@ async fn mqtt_over_websocket_routes_a_message() {
     match subscriber.recv().await {
         Packet::Publish(p) => {
             assert_eq!(&*p.topic, TOPIC, "topic mismatch");
-            assert_eq!(p.payload.as_ref(), b"over-websocket".as_ref(), "payload mismatch");
+            assert_eq!(
+                p.payload.as_ref(),
+                b"over-websocket".as_ref(),
+                "payload mismatch"
+            );
         }
         other => panic!("expected forwarded PUBLISH, got {other:?}"),
     }

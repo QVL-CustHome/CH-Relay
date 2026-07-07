@@ -46,7 +46,10 @@ fn base_config(tcp_port: u16, ws_port: u16, http_line: &str, stem: &str) -> std:
     cfg
 }
 
-fn spawn_relay(cfg: &std::path::Path, allow_external: Option<&str>) -> (ChildGuard, Receiver<String>) {
+fn spawn_relay(
+    cfg: &std::path::Path,
+    allow_external: Option<&str>,
+) -> (ChildGuard, Receiver<String>) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_relay"));
     command
         .env("RELAY_CONFIG", cfg)
@@ -137,7 +140,10 @@ async fn http_get(addr: &str, path: &str) -> Option<(String, String)> {
     let request = format!("GET {path} HTTP/1.1\r\nHost: relay\r\nConnection: close\r\n\r\n");
     socket.write_all(request.as_bytes()).await.ok()?;
     let mut raw = String::new();
-    timeout(Duration::from_secs(2), socket.read_to_string(&mut raw)).await.ok()?.ok()?;
+    timeout(Duration::from_secs(2), socket.read_to_string(&mut raw))
+        .await
+        .ok()?
+        .ok()?;
     let (head, body) = raw.split_once("\r\n\r\n").unwrap_or((raw.as_str(), ""));
     let status = head.lines().next().unwrap_or("").to_string();
     Some((status, body.to_string()))
@@ -146,7 +152,10 @@ async fn http_get(addr: &str, path: &str) -> Option<(String, String)> {
 async fn http_listening(addr: &str) -> bool {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
-        if timeout(Duration::from_millis(300), TcpStream::connect(addr)).await.is_ok_and(|r| r.is_ok()) {
+        if timeout(Duration::from_millis(300), TcpStream::connect(addr))
+            .await
+            .is_ok_and(|r| r.is_ok())
+        {
             return true;
         }
         if Instant::now() >= deadline {
@@ -185,12 +194,17 @@ async fn ac1_scenario2_loopback_dashboard_accessible() {
     wait_broker_ready(tcp_port).await;
     let http_addr = format!("127.0.0.1:{http_port}");
 
-    assert!(http_listening(&http_addr).await, "loopback dashboard must listen");
+    assert!(
+        http_listening(&http_addr).await,
+        "loopback dashboard must listen"
+    );
 
     let root = http_get(&http_addr, "/").await.expect("GET / must respond");
     assert!(root.0.contains("200"), "GET / status: {}", root.0);
 
-    let stats = http_get(&http_addr, "/stats").await.expect("GET /stats must respond");
+    let stats = http_get(&http_addr, "/stats")
+        .await
+        .expect("GET /stats must respond");
     assert!(stats.0.contains("200"), "GET /stats status: {}", stats.0);
 }
 
@@ -244,9 +258,14 @@ async fn ac1_scenario4_external_with_flag_binds_and_warns() {
     let joined = logs.join("\n").to_lowercase();
     drop(guard);
 
-    assert!(listens, "with RELAY_HTTP_ALLOW_EXTERNAL=true the external bind must start the dashboard");
     assert!(
-        joined.contains("warn") && joined.contains("exposed") && joined.contains("without authentication"),
+        listens,
+        "with RELAY_HTTP_ALLOW_EXTERNAL=true the external bind must start the dashboard"
+    );
+    assert!(
+        joined.contains("warn")
+            && joined.contains("exposed")
+            && joined.contains("without authentication"),
         "a security warning must be logged when exposing the dashboard externally, got:\n{}",
         logs.join("\n")
     );

@@ -26,8 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    let config_path =
-        std::env::var("RELAY_CONFIG").unwrap_or_else(|_| "config.toml".to_string());
+    let config_path = std::env::var("RELAY_CONFIG").unwrap_or_else(|_| "config.toml".to_string());
     let config = Config::load(&config_path)?;
 
     info!(tcp = %config.tcp_addr, ws = %config.ws_addr, "Relay starting");
@@ -75,7 +74,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let (Some(cert), Some(key)) = (&config.tls_cert, &config.tls_key) {
         let acceptor = tls::acceptor(cert, key)?;
-        let tls_addr = config.tls_addr.unwrap_or_else(|| "0.0.0.0:8883".parse().unwrap());
+        let tls_addr = config
+            .tls_addr
+            .unwrap_or_else(|| "0.0.0.0:8883".parse().unwrap());
         let tls_listener = TcpListener::bind(tls_addr).await?;
         info!("relay listening on mqtts://{tls_addr} (TLS)");
         let hub = hub.clone();
@@ -96,7 +97,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         tokio::spawn(async move {
                             match acceptor.accept(socket).await {
                                 Ok(stream) => {
-                                    connection::handle(stream, format!("tls://{peer}"), hub, auth, limits, permit).await;
+                                    connection::handle(
+                                        stream,
+                                        format!("tls://{peer}"),
+                                        hub,
+                                        auth,
+                                        limits,
+                                        permit,
+                                    )
+                                    .await;
                                 }
                                 Err(e) => warn!(%peer, error = %e, "TLS handshake failed"),
                             }

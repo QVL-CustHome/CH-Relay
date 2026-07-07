@@ -6,8 +6,8 @@ use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use rmqtt_codec::v5::{Codec, Connect, Packet, Subscribe, SubscriptionOptions};
-use std::time::Duration;
 use std::process::{Child, Command};
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::{sleep, timeout, Instant};
@@ -21,8 +21,12 @@ const EXP: i64 = 4_102_444_800;
 
 fn jwt(sub: &str, roles: &[&str]) -> String {
     let claims = serde_json::json!({ "sub": sub, "roles": roles, "exp": EXP });
-    encode(&Header::new(Algorithm::HS256), &claims, &EncodingKey::from_secret(SECRET.as_bytes()))
-        .expect("encode jwt")
+    encode(
+        &Header::new(Algorithm::HS256),
+        &claims,
+        &EncodingKey::from_secret(SECRET.as_bytes()),
+    )
+    .expect("encode jwt")
 }
 
 struct ChildGuard(Child);
@@ -87,9 +91,15 @@ async fn http_get(addr: &str, path: &str) -> (String, String) {
         }
     };
     let request = format!("GET {path} HTTP/1.1\r\nHost: relay\r\nConnection: close\r\n\r\n");
-    socket.write_all(request.as_bytes()).await.expect("send request");
+    socket
+        .write_all(request.as_bytes())
+        .await
+        .expect("send request");
     let mut raw = String::new();
-    socket.read_to_string(&mut raw).await.expect("read response");
+    socket
+        .read_to_string(&mut raw)
+        .await
+        .expect("read response");
     let (head, body) = raw.split_once("\r\n\r\n").unwrap_or((raw.as_str(), ""));
     let status = head.lines().next().unwrap_or("").to_string();
     (status, body.to_string())

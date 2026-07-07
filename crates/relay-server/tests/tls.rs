@@ -25,8 +25,12 @@ const EXP: i64 = 4_102_444_800;
 
 fn jwt(sub: &str, roles: &[&str]) -> String {
     let claims = serde_json::json!({ "sub": sub, "roles": roles, "exp": EXP });
-    encode(&Header::new(Algorithm::HS256), &claims, &EncodingKey::from_secret(SECRET.as_bytes()))
-        .expect("encode jwt")
+    encode(
+        &Header::new(Algorithm::HS256),
+        &claims,
+        &EncodingKey::from_secret(SECRET.as_bytes()),
+    )
+    .expect("encode jwt")
 }
 
 struct ChildGuard(Child);
@@ -130,7 +134,10 @@ async fn mqtts_handshake_over_tls() {
     };
 
     framed
-        .send(Packet::from(connect_packet("secure-client", &jwt("secure-client", &["*"]))))
+        .send(Packet::from(connect_packet(
+            "secure-client",
+            &jwt("secure-client", &["*"]),
+        )))
         .await
         .expect("send CONNECT over TLS");
 

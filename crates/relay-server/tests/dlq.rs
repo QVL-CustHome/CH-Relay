@@ -25,8 +25,12 @@ const EXP: i64 = 4_102_444_800;
 
 fn jwt(sub: &str, roles: &[&str]) -> String {
     let claims = serde_json::json!({ "sub": sub, "roles": roles, "exp": EXP });
-    encode(&Header::new(Algorithm::HS256), &claims, &EncodingKey::from_secret(SECRET.as_bytes()))
-        .expect("encode jwt")
+    encode(
+        &Header::new(Algorithm::HS256),
+        &claims,
+        &EncodingKey::from_secret(SECRET.as_bytes()),
+    )
+    .expect("encode jwt")
 }
 
 struct ChildGuard(Child);
@@ -83,7 +87,10 @@ async fn connect(addr: &str, client_id: &str) -> Client {
     };
     let mut framed = Framed::new(stream, Codec::new(256 * 1024, 0));
     framed
-        .send(Packet::from(connect_packet(client_id, &jwt(client_id, &["*"]))))
+        .send(Packet::from(connect_packet(
+            client_id,
+            &jwt(client_id, &["*"]),
+        )))
         .await
         .expect("send CONNECT");
     match next_packet(&mut framed).await {
@@ -176,7 +183,11 @@ async fn undelivered_qos1_message_is_dead_lettered() {
                 format!("$dlq/{CLIENT}/{TOPIC}"),
                 "dead-letter topic must carry the client and original topic"
             );
-            assert_eq!(p.payload.as_ref(), b"order#42".as_ref(), "payload preserved");
+            assert_eq!(
+                p.payload.as_ref(),
+                b"order#42".as_ref(),
+                "payload preserved"
+            );
         }
         other => panic!("expected a dead-lettered message on $dlq/#, got {other:?}"),
     }

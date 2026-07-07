@@ -106,7 +106,11 @@ async fn raw_connect(addr: &str) -> Client {
     Framed::new(stream, Codec::new(256 * 1024, 0))
 }
 
-async fn connect_as_service(addr: &str, client_id: &str, token: &str) -> (Client, ConnectAckReason) {
+async fn connect_as_service(
+    addr: &str,
+    client_id: &str,
+    token: &str,
+) -> (Client, ConnectAckReason) {
     let mut framed = raw_connect(addr).await;
     framed
         .send(Packet::from(connect_packet(client_id, token)))

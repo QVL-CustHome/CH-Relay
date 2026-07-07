@@ -33,7 +33,9 @@ impl Acl {
     /// May this principal subscribe with `filter`? True only if some allowed
     /// pattern subsumes the requested filter (the request cannot be broader).
     pub fn can_subscribe(&self, filter: &str) -> bool {
-        self.subscribe.iter().any(|pat| filter_subsumes(pat, filter))
+        self.subscribe
+            .iter()
+            .any(|pat| filter_subsumes(pat, filter))
     }
 }
 

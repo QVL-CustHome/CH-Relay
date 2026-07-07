@@ -25,8 +25,12 @@ const EXP: i64 = 4_102_444_800;
 
 fn jwt(sub: &str, roles: &[&str]) -> String {
     let claims = serde_json::json!({ "sub": sub, "roles": roles, "exp": EXP });
-    encode(&Header::new(Algorithm::HS256), &claims, &EncodingKey::from_secret(SECRET.as_bytes()))
-        .expect("encode jwt")
+    encode(
+        &Header::new(Algorithm::HS256),
+        &claims,
+        &EncodingKey::from_secret(SECRET.as_bytes()),
+    )
+    .expect("encode jwt")
 }
 
 struct ChildGuard(Child);
@@ -84,7 +88,12 @@ async fn connect(addr: &str, client_id: &str, clean_start: bool, expiry: u32) ->
     };
     let mut framed = Framed::new(stream, Codec::new(256 * 1024, 0));
     framed
-        .send(Packet::from(connect_packet(client_id, clean_start, expiry, &jwt(client_id, &["*"]))))
+        .send(Packet::from(connect_packet(
+            client_id,
+            clean_start,
+            expiry,
+            &jwt(client_id, &["*"]),
+        )))
         .await
         .expect("send CONNECT");
     match next_packet(&mut framed).await {
@@ -126,7 +135,9 @@ async fn subscribe_qos1(client: &mut Client, topic: &str) {
 
 async fn try_next_payload(client: &mut Client) -> Option<String> {
     match timeout(Duration::from_millis(600), client.next()).await {
-        Ok(Some(Ok((Packet::Publish(p), _)))) => Some(String::from_utf8_lossy(&p.payload).into_owned()),
+        Ok(Some(Ok((Packet::Publish(p), _)))) => {
+            Some(String::from_utf8_lossy(&p.payload).into_owned())
+        }
         Ok(other) => panic!("unexpected frame: {other:?}"),
         Err(_) => None,
     }
@@ -171,7 +182,10 @@ async fn session_resume_keeps_subscription_and_queues_offline_messages() {
     // While the subscriber is offline, publish a QoS 1 message.
     let (mut publisher, _) = connect(&addr, "publisher", true, 0).await;
     publisher
-        .send(Packet::Publish(Box::new(qos1_publish("events", b"queued-while-offline"))))
+        .send(Packet::Publish(Box::new(qos1_publish(
+            "events",
+            b"queued-while-offline",
+        ))))
         .await
         .expect("send PUBLISH");
     match next_packet(&mut publisher).await {
@@ -208,7 +222,10 @@ async fn clean_start_wipes_the_previous_session() {
     // Publish to the old topic; the cleaned client should NOT receive it.
     let (mut publisher, _) = connect(&addr, "publisher", true, 0).await;
     publisher
-        .send(Packet::Publish(Box::new(qos1_publish("events", b"should-not-arrive"))))
+        .send(Packet::Publish(Box::new(qos1_publish(
+            "events",
+            b"should-not-arrive",
+        ))))
         .await
         .expect("send PUBLISH");
     match next_packet(&mut publisher).await {

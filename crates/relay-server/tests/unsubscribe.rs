@@ -21,8 +21,12 @@ const EXP: i64 = 4_102_444_800;
 
 fn jwt(sub: &str, roles: &[&str]) -> String {
     let claims = serde_json::json!({ "sub": sub, "roles": roles, "exp": EXP });
-    encode(&Header::new(Algorithm::HS256), &claims, &EncodingKey::from_secret(SECRET.as_bytes()))
-        .expect("encode jwt")
+    encode(
+        &Header::new(Algorithm::HS256),
+        &claims,
+        &EncodingKey::from_secret(SECRET.as_bytes()),
+    )
+    .expect("encode jwt")
 }
 
 struct ChildGuard(Child);
@@ -79,7 +83,10 @@ async fn connect(addr: &str, client_id: &str) -> Client {
     };
     let mut framed = Framed::new(stream, Codec::new(256 * 1024, 0));
     framed
-        .send(Packet::from(connect_packet(client_id, &jwt(client_id, &["*"]))))
+        .send(Packet::from(connect_packet(
+            client_id,
+            &jwt(client_id, &["*"]),
+        )))
         .await
         .expect("send CONNECT");
     match next_packet(&mut framed).await {
@@ -99,7 +106,9 @@ async fn next_packet(framed: &mut Client) -> Packet {
 
 async fn try_next_payload(client: &mut Client) -> Option<String> {
     match timeout(Duration::from_millis(500), client.next()).await {
-        Ok(Some(Ok((Packet::Publish(p), _)))) => Some(String::from_utf8_lossy(&p.payload).into_owned()),
+        Ok(Some(Ok((Packet::Publish(p), _)))) => {
+            Some(String::from_utf8_lossy(&p.payload).into_owned())
+        }
         Ok(other) => panic!("unexpected frame: {other:?}"),
         Err(_) => None,
     }

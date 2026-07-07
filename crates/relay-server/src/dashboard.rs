@@ -49,7 +49,11 @@ async fn handle(socket: &mut TcpStream, hub: &Hub) -> std::io::Result<()> {
     let (status, content_type, body) = match path {
         "/" | "/index.html" => ("200 OK", "text/html; charset=utf-8", INDEX_HTML.to_string()),
         "/stats" | "/stats.json" => ("200 OK", "application/json", stats_json(&hub.stats())),
-        _ => ("404 Not Found", "text/plain; charset=utf-8", "not found".to_string()),
+        _ => (
+            "404 Not Found",
+            "text/plain; charset=utf-8",
+            "not found".to_string(),
+        ),
     };
 
     let response = format!(

@@ -8,8 +8,8 @@ use futures::{SinkExt, StreamExt};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use rmqtt_codec::types::Publish;
 use rmqtt_codec::v5::{Codec, Connect, Packet, PublishProperties, QoS};
-use std::time::Duration;
 use std::process::{Child, Command};
+use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::time::{sleep, timeout, Instant};
 use tokio_util::codec::Framed;
@@ -23,8 +23,12 @@ const EXP: i64 = 4_102_444_800;
 
 fn jwt(sub: &str, roles: &[&str]) -> String {
     let claims = serde_json::json!({ "sub": sub, "roles": roles, "exp": EXP });
-    encode(&Header::new(Algorithm::HS256), &claims, &EncodingKey::from_secret(SECRET.as_bytes()))
-        .expect("encode jwt")
+    encode(
+        &Header::new(Algorithm::HS256),
+        &claims,
+        &EncodingKey::from_secret(SECRET.as_bytes()),
+    )
+    .expect("encode jwt")
 }
 
 struct ChildGuard(Child);
@@ -81,7 +85,10 @@ async fn connect(addr: &str, client_id: &str) -> Client {
     };
     let mut framed = Framed::new(stream, Codec::new(256 * 1024, 0));
     framed
-        .send(Packet::from(connect_packet(client_id, &jwt(client_id, &["*"]))))
+        .send(Packet::from(connect_packet(
+            client_id,
+            &jwt(client_id, &["*"]),
+        )))
         .await
         .expect("send CONNECT");
     match next_packet(&mut framed).await {

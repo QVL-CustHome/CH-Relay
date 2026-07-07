@@ -37,7 +37,11 @@ fn default_allowed_audiences() -> Vec<String> {
             .filter(|s| !s.is_empty())
             .map(String::from)
             .collect(),
-        Err(_) => vec!["ch-api-drive".into(), "ch-api-budgy".into(), "ch-relay".into()],
+        Err(_) => vec![
+            "ch-api-drive".into(),
+            "ch-api-budgy".into(),
+            "ch-relay".into(),
+        ],
     }
 }
 
@@ -95,7 +99,11 @@ impl AuthConfig {
         let roles: Vec<String> = claims
             .get(&self.roles_claim)
             .and_then(Value::as_array)
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
 
         let mut vars: HashMap<&str, &str> = claims
@@ -168,7 +176,12 @@ mod tests {
     use jsonwebtoken::{encode, EncodingKey, Header};
 
     fn token(secret: &str, claims: Value) -> String {
-        encode(&Header::new(Algorithm::HS256), &claims, &EncodingKey::from_secret(secret.as_bytes())).unwrap()
+        encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .unwrap()
     }
 
     fn cfg() -> AuthConfig {
@@ -178,8 +191,16 @@ mod tests {
             roles_claim: "roles".into(),
             allowed_audiences: vec!["ch-api-drive".into(), "ch-api-budgy".into()],
             acl: vec![
-                AclRule { role: "drive".into(), publish: vec!["drive/{sub}/#".into()], subscribe: vec!["drive/{sub}/#".into()] },
-                AclRule { role: "drive_admin".into(), publish: vec!["drive/#".into()], subscribe: vec!["drive/#".into()] },
+                AclRule {
+                    role: "drive".into(),
+                    publish: vec!["drive/{sub}/#".into()],
+                    subscribe: vec!["drive/{sub}/#".into()],
+                },
+                AclRule {
+                    role: "drive_admin".into(),
+                    publish: vec!["drive/#".into()],
+                    subscribe: vec!["drive/#".into()],
+                },
             ],
         }
     }
@@ -191,15 +212,27 @@ mod tests {
     fn rejects_missing_or_bad_token() {
         let c = cfg();
         assert!(matches!(c.authenticate(None), Err(AuthError::InvalidToken)));
-        assert!(matches!(c.authenticate(Some(b"not-a-jwt")), Err(AuthError::InvalidToken)));
-        let wrong = token("other-secret", serde_json::json!({"sub": "u1", "exp": EXP, "iss": ISS, "aud": "ch-api-drive"}));
-        assert!(matches!(c.authenticate(Some(wrong.as_bytes())), Err(AuthError::InvalidToken)));
+        assert!(matches!(
+            c.authenticate(Some(b"not-a-jwt")),
+            Err(AuthError::InvalidToken)
+        ));
+        let wrong = token(
+            "other-secret",
+            serde_json::json!({"sub": "u1", "exp": EXP, "iss": ISS, "aud": "ch-api-drive"}),
+        );
+        assert!(matches!(
+            c.authenticate(Some(wrong.as_bytes())),
+            Err(AuthError::InvalidToken)
+        ));
     }
 
     #[test]
     fn user_gets_own_subtree() {
         let c = cfg();
-        let t = token("test-secret", serde_json::json!({"sub": "u1", "roles": ["drive"], "exp": EXP, "iss": ISS, "aud": "ch-api-drive"}));
+        let t = token(
+            "test-secret",
+            serde_json::json!({"sub": "u1", "roles": ["drive"], "exp": EXP, "iss": ISS, "aud": "ch-api-drive"}),
+        );
         let p = c.authenticate(Some(t.as_bytes())).unwrap();
         assert_eq!(p.identity, "u1");
         assert!(p.acl.can_publish("drive/u1/files/1"));
@@ -211,7 +244,10 @@ mod tests {
     #[test]
     fn admin_gets_whole_tree() {
         let c = cfg();
-        let t = token("test-secret", serde_json::json!({"sub": "boss", "roles": ["drive_admin"], "exp": EXP, "iss": ISS, "aud": ["ch-api-budgy", "ch-api-drive"]}));
+        let t = token(
+            "test-secret",
+            serde_json::json!({"sub": "boss", "roles": ["drive_admin"], "exp": EXP, "iss": ISS, "aud": ["ch-api-budgy", "ch-api-drive"]}),
+        );
         let p = c.authenticate(Some(t.as_bytes())).unwrap();
         assert!(p.acl.can_subscribe("drive/#"));
         assert!(p.acl.can_publish("drive/anyone/x"));

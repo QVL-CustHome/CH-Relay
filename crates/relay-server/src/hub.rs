@@ -25,9 +25,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
 use relay_core::{ClientId, Message, QoS, RetainedStore, Router, SharedSubscription, TopicFilter};
 use rmqtt_codec::types::Publish;
-use rmqtt_codec::v5::{
-    Packet, PublishAck2, PublishAck2Reason, PublishProperties, QoS as WireQoS,
-};
+use rmqtt_codec::v5::{Packet, PublishAck2, PublishAck2Reason, PublishProperties, QoS as WireQoS};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -49,7 +47,11 @@ pub struct RetryConfig {
 
 impl Default for RetryConfig {
     fn default() -> Self {
-        RetryConfig { max_attempts: 5, base: Duration::from_secs(5), cap: Duration::from_secs(60) }
+        RetryConfig {
+            max_attempts: 5,
+            base: Duration::from_secs(5),
+            cap: Duration::from_secs(60),
+        }
     }
 }
 
@@ -154,7 +156,11 @@ fn encode_publish_entry(out: &mut Vec<u8>, tag: u8, attempts: u32, p: &Publish) 
 /// Decode a persisted in-flight blob into `(next_id, queue)`, recomputing each
 /// entry's `next_due` from its attempt count. Returns `None` on any malformed
 /// input (the session then simply starts with an empty queue).
-fn decode_inflight(blob: &[u8], now: Instant, cfg: &RetryConfig) -> Option<(u16, VecDeque<InflightEntry>)> {
+fn decode_inflight(
+    blob: &[u8],
+    now: Instant,
+    cfg: &RetryConfig,
+) -> Option<(u16, VecDeque<InflightEntry>)> {
     let mut c = std::io::Cursor::new(blob);
     let next_id = read_u16(&mut c)?;
     let mut queue = VecDeque::new();
@@ -170,7 +176,11 @@ fn decode_inflight(blob: &[u8], now: Instant, cfg: &RetryConfig) -> Option<(u16,
                 let topic = read_bytes(&mut c, topic_len)?;
                 let payload_len = read_u32(&mut c)? as usize;
                 let payload = read_bytes(&mut c, payload_len)?;
-                let wire = if tag == 1 { WireQoS::AtLeastOnce } else { WireQoS::ExactlyOnce };
+                let wire = if tag == 1 {
+                    WireQoS::AtLeastOnce
+                } else {
+                    WireQoS::ExactlyOnce
+                };
                 let p = make_publish(
                     &String::from_utf8_lossy(&topic),
                     &Bytes::from(payload),
@@ -179,12 +189,20 @@ fn decode_inflight(blob: &[u8], now: Instant, cfg: &RetryConfig) -> Option<(u16,
                     retain,
                     false,
                 );
-                if tag == 1 { Inflight::Qos1(p) } else { Inflight::Qos2AwaitRec(p) }
+                if tag == 1 {
+                    Inflight::Qos1(p)
+                } else {
+                    Inflight::Qos2AwaitRec(p)
+                }
             }
             3 => Inflight::Qos2AwaitComp(NonZeroU16::new(read_u16(&mut c)?)?),
             _ => return None,
         };
-        queue.push_back(InflightEntry { state, attempts, next_due });
+        queue.push_back(InflightEntry {
+            state,
+            attempts,
+            next_due,
+        });
     }
     Some((next_id, queue))
 }
@@ -192,8 +210,18 @@ fn decode_inflight(blob: &[u8], now: Instant, cfg: &RetryConfig) -> Option<(u16,
 /// Serialize a dead-lettered message for persistence/replay. Layout:
 /// `ts(u64) attempts(u32) reason_len(u16) reason client_len(u16) client
 /// topic_len(u16) topic qos(u8) payload`.
-fn encode_dead_letter(client_id: &str, topic: &str, reason: &str, attempts: u32, qos: u8, payload: &Bytes) -> Vec<u8> {
-    let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+fn encode_dead_letter(
+    client_id: &str,
+    topic: &str,
+    reason: &str,
+    attempts: u32,
+    qos: u8,
+    payload: &Bytes,
+) -> Vec<u8> {
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let mut out = Vec::new();
     out.extend_from_slice(&ts.to_be_bytes());
     out.extend_from_slice(&attempts.to_be_bytes());
@@ -211,7 +239,10 @@ fn encode_dead_letter(client_id: &str, topic: &str, reason: &str, attempts: u32,
 /// Serialize a logged event. Layout: `ts(u64) qos(u8) topic_len(u16) topic
 /// payload`. The offset is the storage key, not part of the blob.
 fn encode_event(topic: &str, qos: u8, payload: &Bytes) -> Vec<u8> {
-    let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let mut out = Vec::new();
     out.extend_from_slice(&ts.to_be_bytes());
     out.push(qos);
@@ -332,7 +363,15 @@ impl Session {
     /// Deliver a message to this session at the given (already effective) QoS.
     /// QoS 0 is dropped while offline; QoS 1/2 are recorded as in-flight (with
     /// the first retry due after one back-off) and transmitted when online.
-    fn deliver(&mut self, topic: &str, payload: &Bytes, qos: QoS, retain: bool, now: Instant, cfg: &RetryConfig) {
+    fn deliver(
+        &mut self,
+        topic: &str,
+        payload: &Bytes,
+        qos: QoS,
+        retain: bool,
+        now: Instant,
+        cfg: &RetryConfig,
+    ) {
         match qos {
             QoS::AtMostOnce => {
                 let p = make_publish(topic, payload, WireQoS::AtMostOnce, None, retain, false);
@@ -340,14 +379,22 @@ impl Session {
             }
             QoS::AtLeastOnce | QoS::ExactlyOnce => {
                 let pid = self.allocate_id();
-                let wire = if qos == QoS::AtLeastOnce { WireQoS::AtLeastOnce } else { WireQoS::ExactlyOnce };
+                let wire = if qos == QoS::AtLeastOnce {
+                    WireQoS::AtLeastOnce
+                } else {
+                    WireQoS::ExactlyOnce
+                };
                 let p = make_publish(topic, payload, wire, Some(pid), retain, false);
                 let state = if qos == QoS::AtLeastOnce {
                     Inflight::Qos1(p.clone())
                 } else {
                     Inflight::Qos2AwaitRec(p.clone())
                 };
-                self.inflight.push_back(InflightEntry { state, attempts: 1, next_due: now + backoff(cfg, 1) });
+                self.inflight.push_back(InflightEntry {
+                    state,
+                    attempts: 1,
+                    next_due: now + backoff(cfg, 1),
+                });
                 self.send(Packet::Publish(Box::new(p)));
             }
         }
@@ -373,8 +420,9 @@ impl Session {
     }
 
     fn on_puback(&mut self, pid: u16) {
-        self.inflight
-            .retain(|e| !matches!(&e.state, Inflight::Qos1(p) if p.packet_id.map(|x| x.get()) == Some(pid)));
+        self.inflight.retain(
+            |e| !matches!(&e.state, Inflight::Qos1(p) if p.packet_id.map(|x| x.get()) == Some(pid)),
+        );
     }
 
     /// PUBREC for one of our QoS 2 PUBLISHes: move it to "awaiting PUBCOMP" and
@@ -426,7 +474,10 @@ impl Session {
             if dead_now {
                 if let Some(entry) = self.inflight.remove(i) {
                     if let Inflight::Qos1(p) | Inflight::Qos2AwaitRec(p) = entry.state {
-                        dead.push(DeadMsg { publish: p, attempts });
+                        dead.push(DeadMsg {
+                            publish: p,
+                            attempts,
+                        });
                     }
                 }
                 changed = true;
@@ -459,7 +510,10 @@ impl Session {
         let mut dead = Vec::new();
         self.inflight.retain(|e| match &e.state {
             Inflight::Qos1(p) | Inflight::Qos2AwaitRec(p) if !is_dlq_topic(&p.topic) => {
-                dead.push(DeadMsg { publish: p.clone(), attempts: e.attempts });
+                dead.push(DeadMsg {
+                    publish: p.clone(),
+                    attempts: e.attempts,
+                });
                 false
             }
             _ => true,
@@ -566,9 +620,11 @@ impl Hub {
                         }
                         // Re-create the session offline (generation 0), restoring
                         // its in-flight queue + packet-id counter if any.
-                        let mut session = Session::new(ps.client_id.clone(), None, ps.expiry_secs, 0);
-                        if let Some((next_id, queue)) =
-                            inflight.get(&ps.client_id).and_then(|b| decode_inflight(b, now, &retry))
+                        let mut session =
+                            Session::new(ps.client_id.clone(), None, ps.expiry_secs, 0);
+                        if let Some((next_id, queue)) = inflight
+                            .get(&ps.client_id)
+                            .and_then(|b| decode_inflight(b, now, &retry))
                         {
                             session.next_id = next_id;
                             session.inflight = queue;
@@ -652,7 +708,12 @@ impl Hub {
                     Session::new(client_id.to_string(), Some(tx), expiry_secs, generation),
                 );
                 self.persist_meta(client_id, expiry_secs);
-                return Connected { id: new_id, generation, rx, session_present: false };
+                return Connected {
+                    id: new_id,
+                    generation,
+                    rx,
+                    session_present: false,
+                };
             }
             // Resume: re-attach the channel, refresh expiry, retransmit in-flight.
             let session = table.by_id.get_mut(&id).expect("index/table consistency");
@@ -661,7 +722,12 @@ impl Hub {
             session.generation = generation;
             session.retransmit(Instant::now(), &self.inner.retry);
             self.persist_meta(client_id, expiry_secs);
-            return Connected { id, generation, rx, session_present: true };
+            return Connected {
+                id,
+                generation,
+                rx,
+                session_present: true,
+            };
         }
 
         // Brand-new session.
@@ -672,7 +738,12 @@ impl Hub {
             Session::new(client_id.to_string(), Some(tx), expiry_secs, generation),
         );
         self.persist_meta(client_id, expiry_secs);
-        Connected { id, generation, rx, session_present: false }
+        Connected {
+            id,
+            generation,
+            rx,
+            session_present: false,
+        }
     }
 
     /// Queue a durable write onto the persistence worker. A no-op when running
@@ -697,7 +768,9 @@ impl Hub {
                 expiry_secs,
             });
         } else {
-            self.enqueue(PersistOp::RemoveSession { client_id: client_id.to_string() });
+            self.enqueue(PersistOp::RemoveSession {
+                client_id: client_id.to_string(),
+            });
         }
     }
 
@@ -719,7 +792,9 @@ impl Hub {
 
     /// Forget a persisted session and its subscriptions (e.g. on clean start).
     fn forget_persisted(&self, client_id: &str) {
-        self.enqueue(PersistOp::RemoveSession { client_id: client_id.to_string() });
+        self.enqueue(PersistOp::RemoveSession {
+            client_id: client_id.to_string(),
+        });
     }
 
     /// Persist one subscription if the session is durable (expiry > 0).
@@ -787,7 +862,10 @@ impl Hub {
                 .get_mut(&id)
                 .map(|s| {
                     let cid = s.client_id.clone();
-                    s.drain_undelivered().into_iter().map(move |d| (cid.clone(), d)).collect()
+                    s.drain_undelivered()
+                        .into_iter()
+                        .map(move |d| (cid.clone(), d))
+                        .collect()
                 })
                 .unwrap_or_else(Vec::new);
             self.discard(&mut table, id);
@@ -841,7 +919,14 @@ impl Hub {
         warn!(%client_id, topic = original_topic, attempts = msg.attempts, reason, "dead-lettering message");
 
         if self.inner.persist.is_some() {
-            let blob = encode_dead_letter(client_id, original_topic, reason, msg.attempts, qos as u8, &msg.publish.payload);
+            let blob = encode_dead_letter(
+                client_id,
+                original_topic,
+                reason,
+                msg.attempts,
+                qos as u8,
+                &msg.publish.payload,
+            );
             self.enqueue(PersistOp::AppendDeadLetter { blob });
         }
 
@@ -870,7 +955,14 @@ impl Hub {
 
     /// Register a shared subscription: `id` joins `group` with `filter` at `qos`.
     /// `raw` is the `$share/...` string as sent, persisted for durable sessions.
-    pub fn subscribe_shared(&self, group: String, id: ClientId, filter: TopicFilter, qos: QoS, raw: &str) {
+    pub fn subscribe_shared(
+        &self,
+        group: String,
+        id: ClientId,
+        filter: TopicFilter,
+        qos: QoS,
+        raw: &str,
+    ) {
         self.inner
             .router
             .lock()
@@ -901,7 +993,10 @@ impl Hub {
                     .map(|s| s.client_id.clone())
             };
             if let Some(client_id) = client_id {
-                self.enqueue(PersistOp::RemoveSubscription { client_id, raw: raw.to_string() });
+                self.enqueue(PersistOp::RemoveSubscription {
+                    client_id,
+                    raw: raw.to_string(),
+                });
             }
         }
         removed
@@ -923,7 +1018,14 @@ impl Hub {
                     for msg in retained {
                         let effective = msg.qos.min(granted);
                         any_qos_gt0 |= effective != QoS::AtMostOnce;
-                        session.deliver(&msg.topic, &msg.payload, effective, true, now, &self.inner.retry);
+                        session.deliver(
+                            &msg.topic,
+                            &msg.payload,
+                            effective,
+                            true,
+                            now,
+                            &self.inner.retry,
+                        );
                     }
                     if any_qos_gt0 {
                         self.snapshot_inflight(session)
@@ -963,7 +1065,10 @@ impl Hub {
         // control/system topics such as `$dlq/...` are not journalled).
         if self.inner.event_log_max > 0 && !topic.starts_with('$') {
             let blob = encode_event(topic, msg_qos as u8, payload);
-            self.enqueue(PersistOp::AppendEvent { blob, retention: self.inner.event_log_max });
+            self.enqueue(PersistOp::AppendEvent {
+                blob,
+                retention: self.inner.event_log_max,
+            });
         }
 
         // Resolve targets, releasing the router lock before touching sessions.
@@ -1000,7 +1105,9 @@ impl Hub {
     /// its offset in the `x-replay-offset` user property. Returns how many were
     /// replayed. A no-op without persistence (the event log lives on disk).
     pub fn replay(&self, id: ClientId, from: u64, filter: &TopicFilter) -> usize {
-        let Some(storage) = &self.inner.storage else { return 0 };
+        let Some(storage) = &self.inner.storage else {
+            return 0;
+        };
         let events = match storage.load_events(from) {
             Ok(e) => e,
             Err(e) => {
@@ -1009,15 +1116,20 @@ impl Hub {
             }
         };
         let mut table = self.inner.sessions.lock().unwrap();
-        let Some(session) = table.by_id.get_mut(&id) else { return 0 };
+        let Some(session) = table.by_id.get_mut(&id) else {
+            return 0;
+        };
         let mut replayed = 0;
         for (offset, blob) in events {
-            let Some((topic, payload, _qos)) = decode_event(&blob) else { continue };
+            let Some((topic, payload, _qos)) = decode_event(&blob) else {
+                continue;
+            };
             if !filter.matches(&topic) {
                 continue;
             }
             let mut properties = PublishProperties::default();
-            properties.user_properties = vec![("x-replay-offset".into(), offset.to_string().into())];
+            properties.user_properties =
+                vec![("x-replay-offset".into(), offset.to_string().into())];
             let p = Publish {
                 dup: false,
                 retain: false,
@@ -1091,7 +1203,15 @@ impl Hub {
             ),
             None => (0, 0, 0),
         };
-        Stats { clients_online, clients_total, subscriptions, retained, dead_letters, events, next_offset }
+        Stats {
+            clients_online,
+            clients_total,
+            subscriptions,
+            retained,
+            dead_letters,
+            events,
+            next_offset,
+        }
     }
 
     // ---- inbound QoS 2 dedup (we are the receiver) ----

@@ -24,8 +24,12 @@ const EXP: i64 = 4_102_444_800;
 
 fn jwt(sub: &str, roles: &[&str]) -> String {
     let claims = serde_json::json!({ "sub": sub, "roles": roles, "exp": EXP });
-    encode(&Header::new(Algorithm::HS256), &claims, &EncodingKey::from_secret(SECRET.as_bytes()))
-        .expect("encode jwt")
+    encode(
+        &Header::new(Algorithm::HS256),
+        &claims,
+        &EncodingKey::from_secret(SECRET.as_bytes()),
+    )
+    .expect("encode jwt")
 }
 
 struct ChildGuard(Child);
@@ -82,7 +86,10 @@ async fn connect(addr: &str, client_id: &str) -> Client {
     };
     let mut framed = Framed::new(stream, Codec::new(256 * 1024, 0));
     framed
-        .send(Packet::from(connect_packet(client_id, &jwt(client_id, &["*"]))))
+        .send(Packet::from(connect_packet(
+            client_id,
+            &jwt(client_id, &["*"]),
+        )))
         .await
         .expect("send CONNECT");
     match next_packet(&mut framed).await {
@@ -101,7 +108,10 @@ async fn next_packet(framed: &mut Client) -> Packet {
 }
 
 async fn ping(client: &mut Client) {
-    client.send(Packet::PingRequest).await.expect("send PINGREQ");
+    client
+        .send(Packet::PingRequest)
+        .await
+        .expect("send PINGREQ");
     match next_packet(client).await {
         Packet::PingResponse => {}
         other => panic!("expected PINGRESP, got {other:?}"),
@@ -181,7 +191,11 @@ async fn retained_message_survives_a_restart() {
     match next_packet(&mut subscriber).await {
         Packet::Publish(p) => {
             assert_eq!(&*p.topic, TOPIC, "topic mismatch after restart");
-            assert_eq!(p.payload.as_ref(), b"open".as_ref(), "payload lost across restart");
+            assert_eq!(
+                p.payload.as_ref(),
+                b"open".as_ref(),
+                "payload lost across restart"
+            );
             assert!(p.retain, "reloaded message should carry the retain flag");
         }
         other => panic!("expected the persisted retained PUBLISH, got {other:?}"),

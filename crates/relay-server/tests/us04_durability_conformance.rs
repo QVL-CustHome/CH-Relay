@@ -17,8 +17,12 @@ const EXP: i64 = 4_102_444_800;
 
 fn jwt(sub: &str, roles: &[&str]) -> String {
     let claims = serde_json::json!({ "sub": sub, "roles": roles, "exp": EXP });
-    encode(&Header::new(Algorithm::HS256), &claims, &EncodingKey::from_secret(SECRET.as_bytes()))
-        .expect("encode jwt")
+    encode(
+        &Header::new(Algorithm::HS256),
+        &claims,
+        &EncodingKey::from_secret(SECRET.as_bytes()),
+    )
+    .expect("encode jwt")
 }
 
 type Client = Framed<TcpStream, Codec>;
@@ -129,7 +133,13 @@ fn connect_packet(client_id: &str, clean_start: bool, token: &str) -> Connect {
     }
 }
 
-fn publish_packet(topic: &str, payload: &[u8], qos: QoS, retain: bool, packet_id: Option<u16>) -> Publish {
+fn publish_packet(
+    topic: &str,
+    payload: &[u8],
+    qos: QoS,
+    retain: bool,
+    packet_id: Option<u16>,
+) -> Publish {
     Publish {
         dup: false,
         retain,
@@ -152,7 +162,11 @@ async fn connect(addr: &str, client_id: &str, clean_start: bool) -> Client {
     };
     let mut framed = Framed::new(stream, Codec::new(256 * 1024, 0));
     framed
-        .send(Packet::from(connect_packet(client_id, clean_start, &jwt(client_id, &["*"]))))
+        .send(Packet::from(connect_packet(
+            client_id,
+            clean_start,
+            &jwt(client_id, &["*"]),
+        )))
         .await
         .expect("send CONNECT");
     match next_packet(&mut framed).await {
@@ -196,7 +210,12 @@ async fn next_packet(client: &mut Client) -> Packet {
         .0
 }
 
-async fn publish_qos1_await_puback(client: &mut Client, topic: &str, payload: &[u8], packet_id: u16) {
+async fn publish_qos1_await_puback(
+    client: &mut Client,
+    topic: &str,
+    payload: &[u8],
+    packet_id: u16,
+) {
     client
         .send(Packet::from(publish_packet(
             topic,
@@ -216,7 +235,10 @@ async fn publish_qos1_await_puback(client: &mut Client, topic: &str, payload: &[
     }
 }
 
-async fn collect_publishes(client: &mut Client, window: Duration) -> Vec<(String, String, Option<String>)> {
+async fn collect_publishes(
+    client: &mut Client,
+    window: Duration,
+) -> Vec<(String, String, Option<String>)> {
     let mut out = Vec::new();
     loop {
         match timeout(window, client.next()).await {
@@ -317,7 +339,10 @@ async fn ac3_event_replay_after_qos1_publishes_survives_restart() {
     );
     for (recv_topic, _, offset) in &events {
         assert_eq!(recv_topic, topic, "replayed event on wrong topic");
-        assert!(offset.is_some(), "replayed event missing x-replay-offset property");
+        assert!(
+            offset.is_some(),
+            "replayed event missing x-replay-offset property"
+        );
     }
 }
 
@@ -343,7 +368,11 @@ async fn ac3_event_replay_from_nonzero_offset_returns_tail() {
         .await
         .expect("send full replay");
     let full = collect_publishes(&mut probe, Duration::from_millis(1000)).await;
-    assert_eq!(full.len(), 3, "expected 3 events in full replay, got {full:?}");
+    assert_eq!(
+        full.len(),
+        3,
+        "expected 3 events in full replay, got {full:?}"
+    );
 
     let second_offset = full[1]
         .2

@@ -70,10 +70,7 @@ impl SharedSubscription {
     pub fn parse(subscription: &str) -> Option<Self> {
         let rest = subscription.strip_prefix("$share/")?;
         let (group, filter) = rest.split_once('/')?;
-        if group.is_empty()
-            || group.contains('+')
-            || group.contains('#')
-        {
+        if group.is_empty() || group.contains('+') || group.contains('#') {
             return None;
         }
         let filter = TopicFilter::parse(filter)?;

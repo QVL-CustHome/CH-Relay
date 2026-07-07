@@ -45,7 +45,10 @@ fn refuses_to_boot_without_auth_section() {
         "scrum168-no-auth",
     );
 
-    assert!(!output.status.success(), "broker must refuse to boot without [auth]");
+    assert!(
+        !output.status.success(),
+        "broker must refuse to boot without [auth]"
+    );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -58,5 +61,8 @@ fn refuses_to_boot_without_auth_section() {
 fn refuses_to_boot_when_config_file_is_missing() {
     let output = run_relay_without_config_file();
 
-    assert!(!output.status.success(), "broker must refuse to boot without a config file");
+    assert!(
+        !output.status.success(),
+        "broker must refuse to boot without a config file"
+    );
 }

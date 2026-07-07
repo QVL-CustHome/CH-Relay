@@ -27,8 +27,12 @@ const EXP: i64 = 4_102_444_800;
 
 fn jwt(sub: &str, roles: &[&str]) -> String {
     let claims = serde_json::json!({ "sub": sub, "roles": roles, "exp": EXP });
-    encode(&Header::new(Algorithm::HS256), &claims, &EncodingKey::from_secret(SECRET.as_bytes()))
-        .expect("encode jwt")
+    encode(
+        &Header::new(Algorithm::HS256),
+        &claims,
+        &EncodingKey::from_secret(SECRET.as_bytes()),
+    )
+    .expect("encode jwt")
 }
 
 struct ChildGuard(Child);
@@ -73,7 +77,10 @@ async fn connect(addr: &str, client_id: &str) -> Client {
     };
     let mut framed = Framed::new(stream, Codec::new(256 * 1024, 0));
     framed
-        .send(Packet::from(connect_packet(client_id, &jwt(client_id, &["*"]))))
+        .send(Packet::from(connect_packet(
+            client_id,
+            &jwt(client_id, &["*"]),
+        )))
         .await
         .expect("send CONNECT");
     match next_packet(&mut framed).await {
@@ -167,8 +174,16 @@ async fn qos1_publish_is_acked_and_delivered_with_packet_id() {
     // The broker must PUBACK the publisher with the same packet id.
     match next_packet(&mut publisher).await {
         Packet::PublishAck(ack) => {
-            assert_eq!(ack.packet_id.get(), 7, "PUBACK packet id must echo the PUBLISH");
-            assert_eq!(ack.reason_code, PublishAckReason::Success, "PUBACK should be Success");
+            assert_eq!(
+                ack.packet_id.get(),
+                7,
+                "PUBACK packet id must echo the PUBLISH"
+            );
+            assert_eq!(
+                ack.reason_code,
+                PublishAckReason::Success,
+                "PUBACK should be Success"
+            );
         }
         other => panic!("expected PUBACK to publisher, got {other:?}"),
     }

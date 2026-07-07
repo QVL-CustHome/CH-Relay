@@ -23,8 +23,12 @@ const EXP: i64 = 4_102_444_800;
 
 fn jwt(sub: &str, roles: &[&str]) -> String {
     let claims = serde_json::json!({ "sub": sub, "roles": roles, "exp": EXP });
-    encode(&Header::new(Algorithm::HS256), &claims, &EncodingKey::from_secret(SECRET.as_bytes()))
-        .expect("encode jwt")
+    encode(
+        &Header::new(Algorithm::HS256),
+        &claims,
+        &EncodingKey::from_secret(SECRET.as_bytes()),
+    )
+    .expect("encode jwt")
 }
 
 struct ChildGuard(Child);
@@ -81,7 +85,10 @@ async fn connect(addr: &str, client_id: &str) -> Client {
     };
     let mut framed = Framed::new(stream, Codec::new(256 * 1024, 0));
     framed
-        .send(Packet::from(connect_packet(client_id, &jwt(client_id, &["*"]))))
+        .send(Packet::from(connect_packet(
+            client_id,
+            &jwt(client_id, &["*"]),
+        )))
         .await
         .expect("send CONNECT");
     match next_packet(&mut framed).await {
@@ -120,7 +127,9 @@ async fn next_packet(client: &mut Client) -> Packet {
 /// Read the payload of the next PUBLISH, or `None` if nothing arrives shortly.
 async fn try_next_payload(client: &mut Client) -> Option<String> {
     match timeout(Duration::from_millis(400), client.next()).await {
-        Ok(Some(Ok((Packet::Publish(p), _)))) => Some(String::from_utf8_lossy(&p.payload).into_owned()),
+        Ok(Some(Ok((Packet::Publish(p), _)))) => {
+            Some(String::from_utf8_lossy(&p.payload).into_owned())
+        }
         Ok(other) => panic!("unexpected frame: {other:?}"),
         Err(_) => None, // timed out: no message pending
     }
@@ -177,11 +186,27 @@ async fn shared_subscription_distributes_one_message_per_worker() {
     let w1_first = try_next_payload(&mut worker1).await;
     let w2_first = try_next_payload(&mut worker2).await;
 
-    assert_eq!(w1_first.as_deref(), Some("m1"), "worker1 should get the 1st message");
-    assert_eq!(w2_first.as_deref(), Some("m2"), "worker2 should get the 2nd message");
+    assert_eq!(
+        w1_first.as_deref(),
+        Some("m1"),
+        "worker1 should get the 1st message"
+    );
+    assert_eq!(
+        w2_first.as_deref(),
+        Some("m2"),
+        "worker2 should get the 2nd message"
+    );
 
     // And neither should have a second message waiting (proves it's a queue,
     // not a fan-out where both would receive both messages).
-    assert_eq!(try_next_payload(&mut worker1).await, None, "worker1 got an extra message");
-    assert_eq!(try_next_payload(&mut worker2).await, None, "worker2 got an extra message");
+    assert_eq!(
+        try_next_payload(&mut worker1).await,
+        None,
+        "worker1 got an extra message"
+    );
+    assert_eq!(
+        try_next_payload(&mut worker2).await,
+        None,
+        "worker2 got an extra message"
+    );
 }

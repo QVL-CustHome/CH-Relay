@@ -24,8 +24,12 @@ const EXP: i64 = 4_102_444_800;
 
 fn jwt(sub: &str, roles: &[&str]) -> String {
     let claims = serde_json::json!({ "sub": sub, "roles": roles, "exp": EXP });
-    encode(&Header::new(Algorithm::HS256), &claims, &EncodingKey::from_secret(SECRET.as_bytes()))
-        .expect("encode jwt")
+    encode(
+        &Header::new(Algorithm::HS256),
+        &claims,
+        &EncodingKey::from_secret(SECRET.as_bytes()),
+    )
+    .expect("encode jwt")
 }
 
 struct ChildGuard(Child);
@@ -82,7 +86,10 @@ async fn connect(addr: &str, client_id: &str) -> Client {
     };
     let mut framed = Framed::new(stream, Codec::new(256 * 1024, 0));
     framed
-        .send(Packet::from(connect_packet(client_id, &jwt(client_id, &["*"]))))
+        .send(Packet::from(connect_packet(
+            client_id,
+            &jwt(client_id, &["*"]),
+        )))
         .await
         .expect("send CONNECT");
     match next_packet(&mut framed).await {
@@ -103,7 +110,10 @@ async fn next_packet(framed: &mut Client) -> Packet {
 /// PINGREQ→PINGRESP round-trip. Because a single connection is processed in
 /// order, this guarantees everything sent before the PINGREQ has been handled.
 async fn ping(client: &mut Client) {
-    client.send(Packet::PingRequest).await.expect("send PINGREQ");
+    client
+        .send(Packet::PingRequest)
+        .await
+        .expect("send PINGREQ");
     match next_packet(client).await {
         Packet::PingResponse => {}
         other => panic!("expected PINGRESP, got {other:?}"),
@@ -182,7 +192,10 @@ async fn retained_message_is_replayed_to_late_subscriber_and_cleared() {
         .await
         .expect("late subscriber should receive the retained message");
     assert_eq!(payload, "22.5C", "retained payload mismatch");
-    assert!(retain, "replayed retained message must have the retain flag set");
+    assert!(
+        retain,
+        "replayed retained message must have the retain flag set"
+    );
 
     // Clearing: a zero-length retained publish removes it.
     publisher

@@ -107,11 +107,25 @@ pub async fn handle<S>(
     let (mut sink, mut stream) = Framed::new(io, Codec::new(MAX_INBOUND_SIZE, 0)).split();
 
     let mut buffered: Option<Packet> = None;
-    let first = match timeout(limits.connect_timeout, next_inbound(&mut buffered, &mut stream)).await {
+    let first = match timeout(
+        limits.connect_timeout,
+        next_inbound(&mut buffered, &mut stream),
+    )
+    .await
+    {
         Ok(Inbound::Packet(p)) => p,
-        Ok(Inbound::ProtocolError) => { debug!(%peer, "protocol error before CONNECT, dropping"); return; }
-        Ok(Inbound::Closed) => { info!(%peer, "client closed connection before CONNECT"); return; }
-        Err(_) => { warn!(%peer, "no CONNECT before timeout, dropping"); return; }
+        Ok(Inbound::ProtocolError) => {
+            debug!(%peer, "protocol error before CONNECT, dropping");
+            return;
+        }
+        Ok(Inbound::Closed) => {
+            info!(%peer, "client closed connection before CONNECT");
+            return;
+        }
+        Err(_) => {
+            warn!(%peer, "no CONNECT before timeout, dropping");
+            return;
+        }
     };
 
     let mut session_id: Option<ClientId> = None;
