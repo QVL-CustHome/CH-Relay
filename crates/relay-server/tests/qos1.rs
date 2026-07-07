@@ -26,7 +26,7 @@ const SECRET: &str = "e2e-qos1-secret";
 const EXP: i64 = 4_102_444_800;
 
 fn jwt(sub: &str, roles: &[&str]) -> String {
-    let claims = serde_json::json!({ "sub": sub, "roles": roles, "exp": EXP });
+    let claims = serde_json::json!({ "sub": sub, "roles": roles, "exp": EXP, "iss": "ch-api-authenticator", "aud": "ch-relay" });
     encode(
         &Header::new(Algorithm::HS256),
         &claims,

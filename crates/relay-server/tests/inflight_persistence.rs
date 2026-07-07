@@ -27,7 +27,7 @@ const SECRET: &str = "e2e-inflight-persist-secret";
 const EXP: i64 = 4_102_444_800;
 
 fn jwt(sub: &str, roles: &[&str]) -> String {
-    let claims = serde_json::json!({ "sub": sub, "roles": roles, "exp": EXP });
+    let claims = serde_json::json!({ "sub": sub, "roles": roles, "exp": EXP, "iss": "ch-api-authenticator", "aud": "ch-relay" });
     encode(
         &Header::new(Algorithm::HS256),
         &claims,
@@ -115,8 +115,10 @@ async fn next_packet(framed: &mut Client) -> Packet {
 
 /// Subscribe at QoS 1 so deliveries are at-least-once (and thus queued offline).
 async fn subscribe_qos1(client: &mut Client, topic: &str) {
-    let mut options = SubscriptionOptions::default();
-    options.qos = QoS::AtLeastOnce;
+    let options = SubscriptionOptions {
+        qos: QoS::AtLeastOnce,
+        ..Default::default()
+    };
     client
         .send(Packet::Subscribe(Subscribe {
             packet_id: 1.try_into().unwrap(),

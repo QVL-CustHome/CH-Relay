@@ -24,7 +24,7 @@ const SECRET: &str = "e2e-dlq-secret";
 const EXP: i64 = 4_102_444_800;
 
 fn jwt(sub: &str, roles: &[&str]) -> String {
-    let claims = serde_json::json!({ "sub": sub, "roles": roles, "exp": EXP });
+    let claims = serde_json::json!({ "sub": sub, "roles": roles, "exp": EXP, "iss": "ch-api-authenticator", "aud": "ch-relay" });
     encode(
         &Header::new(Algorithm::HS256),
         &claims,
@@ -109,8 +109,10 @@ async fn next_packet(framed: &mut Client) -> Packet {
 }
 
 async fn subscribe(client: &mut Client, topic: &str, packet_id: u16, qos: QoS) {
-    let mut options = SubscriptionOptions::default();
-    options.qos = qos;
+    let options = SubscriptionOptions {
+        qos,
+        ..Default::default()
+    };
     client
         .send(Packet::Subscribe(Subscribe {
             packet_id: packet_id.try_into().unwrap(),

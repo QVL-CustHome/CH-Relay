@@ -15,3 +15,8 @@ deploy:
     - build
   script:
     - sudo /usr/local/bin/ch-deploy-bin ch-relay "$CI_PROJECT_DIR/target/release/relay"
+
+# override : execution serialisee (evite les collisions sur bases/ports partages)
+test:
+  script:
+    - cargo test -- --test-threads=1

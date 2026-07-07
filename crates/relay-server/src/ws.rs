@@ -24,12 +24,13 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
 fn io_err<E: std::error::Error + Send + Sync + 'static>(e: E) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, e)
+    io::Error::other(e)
 }
 
 /// WebSocket upgrade callback: echo the `mqtt` subprotocol when the client asks
 /// for it (mqtt.js, Paho, HiveMQ web clients all send `Sec-WebSocket-Protocol:
 /// mqtt`), as the MQTT-over-WS spec requires.
+#[allow(clippy::result_large_err)]
 pub fn upgrade_callback(req: &Request, mut response: Response) -> Result<Response, ErrorResponse> {
     let wants_mqtt = req
         .headers()

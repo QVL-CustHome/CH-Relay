@@ -85,9 +85,8 @@ fn collect_logs(rx: &Receiver<String>, window: Duration) -> Vec<String> {
     let mut lines = Vec::new();
     let deadline = std::time::Instant::now() + window;
     while std::time::Instant::now() < deadline {
-        match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(line) => lines.push(line),
-            Err(_) => {}
+        if let Ok(line) = rx.recv_timeout(Duration::from_millis(100)) {
+            lines.push(line)
         }
     }
     lines

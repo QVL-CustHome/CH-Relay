@@ -22,7 +22,7 @@ const SECRET: &str = "e2e-retry-secret";
 const EXP: i64 = 4_102_444_800;
 
 fn jwt(sub: &str, roles: &[&str]) -> String {
-    let claims = serde_json::json!({ "sub": sub, "roles": roles, "exp": EXP });
+    let claims = serde_json::json!({ "sub": sub, "roles": roles, "exp": EXP, "iss": "ch-api-authenticator", "aud": "ch-relay" });
     encode(
         &Header::new(Algorithm::HS256),
         &claims,
@@ -141,11 +141,13 @@ async fn unacked_qos1_is_retransmitted() {
             packet_id: 1.try_into().unwrap(),
             id: None,
             user_properties: Vec::new(),
-            topic_filters: vec![(TOPIC.into(), {
-                let mut o = SubscriptionOptions::default();
-                o.qos = QoS::AtLeastOnce;
-                o
-            })],
+            topic_filters: vec![(
+                TOPIC.into(),
+                SubscriptionOptions {
+                    qos: QoS::AtLeastOnce,
+                    ..Default::default()
+                },
+            )],
         }))
         .await
         .expect("send SUBSCRIBE");

@@ -867,7 +867,7 @@ impl Hub {
                         .map(move |d| (cid.clone(), d))
                         .collect()
                 })
-                .unwrap_or_else(Vec::new);
+                .unwrap_or_default();
             self.discard(&mut table, id);
             dead
         };
@@ -1127,9 +1127,10 @@ impl Hub {
             if !filter.matches(&topic) {
                 continue;
             }
-            let mut properties = PublishProperties::default();
-            properties.user_properties =
-                vec![("x-replay-offset".into(), offset.to_string().into())];
+            let properties = PublishProperties {
+                user_properties: vec![("x-replay-offset".into(), offset.to_string().into())],
+                ..Default::default()
+            };
             let p = Publish {
                 dup: false,
                 retain: false,

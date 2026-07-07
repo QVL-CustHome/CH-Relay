@@ -286,9 +286,8 @@ pub async fn handle<S>(
                                     };
                                     if sink.send(Packet::PublishAck(ack)).await.is_err() { break; }
                                 }
-                                (QoS::ExactlyOnce, Some(packet_id)) => {
-                                    if sink.send(pubrec(packet_id)).await.is_err() { break; }
-                                }
+                                (QoS::ExactlyOnce, Some(packet_id))
+                                    if sink.send(pubrec(packet_id)).await.is_err() => { break; }
                                 _ => {}
                             }
                         } else if !access.can_publish(&topic) {
